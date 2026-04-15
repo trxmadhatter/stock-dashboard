@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
+import json
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -20,6 +22,9 @@ class TradePlan:
     trade_type: str
     expected_hold: str
     score: int
+    dollars_at_risk: Optional[float] = None
+    risk_per_share: Optional[float] = None
+    suggested_shares: Optional[int] = None
 
 
 class BeginnerFriendlyTABot:
@@ -47,7 +52,7 @@ class BeginnerFriendlyTABot:
         daily = daily.dropna().copy()
         self.data_daily = daily
         self.data_weekly = self._resample_ohlcv(daily, "W")
-        self.data_monthly = self._resample_ohlcv(daily, "M")
+        self.data_monthly = self._resample_ohlcv(daily, "ME")
 
     @staticmethod
     def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -186,10 +191,12 @@ class BeginnerFriendlyTABot:
 
     def create_trade_plan(self, df: pd.DataFrame, supports: List[float], resistances: List[float]) -> TradePlan:
         close = float(df["Close"].iloc[-1])
+
         ma20 = float(self.sma(df["Close"], 20).iloc[-1])
         ma50 = float(self.sma(df["Close"], 50).iloc[-1])
         ma100 = float(self.sma(df["Close"], 100).iloc[-1])
         ma200 = float(self.sma(df["Close"], 200).iloc[-1])
+
         rsi_value = float(self.rsi(df["Close"]).iloc[-1])
         macd_line, signal_line, _ = self.macd(df["Close"])
         macd_now = float(macd_line.iloc[-1])
@@ -198,69 +205,82 @@ class BeginnerFriendlyTABot:
         avg20_vol = float(df["Volume"].tail(20).mean())
         last_vol = float(df["Volume"].iloc[-1])
 
-        bullish_points = 0
-        bearish_points = 0
+        bullish = 0
+        bearish = 0
 
         if close > ma20:
-            bullish_points += 1
+            bullish += 1
         else:
-            bearish_points += 1
+            bearish += 1
 
         if close > ma50:
-            bullish_points += 1
+            bullish += 1
         else:
-            bearish_points += 1
+            bearish += 1
 
         if ma50 > ma100 > ma200:
-            bullish_points += 2
+            bullish += 2
         elif ma50 < ma100 < ma200:
-            bearish_points += 2
+            bearish += 2
 
         if 50 <= rsi_value <= 65:
-            bullish_points += 1
-        elif 35 <= rsi_value < 50:
-            bearish_points += 1
-        elif rsi_value > 70:
-            bearish_points += 1
-        elif rsi_value < 30:
-            bullish_points += 1
+            bullish += 1
+        elif rsi_value < 45:
+            bearish += 1
 
         if macd_now > signal_now:
-            bullish_points += 1
+            bullish += 1
         else:
-            bearish_points += 1
+            bearish += 1
 
-        if last_vol > avg20_vol * 1.2:
+        if last_vol > avg20_vol:
             if close > float(df["Close"].iloc[-2]):
-                bullish_points += 1
+                bullish += 1
             else:
-                bearish_points += 1
+                bearish += 1
 
-        nearest_support = max([s for s in supports if s < close], default=min(supports))
-        nearest_resistance = min([r for r in resistances if r > close], default=max(resistances))
+        score = bullish - bearish
 
-        score = bullish_points - bearish_points
+        high = df["High"]
+        low = df["Low"]
+        prev_close = df["Close"].shift()
+        tr = pd.concat(
+            [
+                (high - low),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
 
-        if bullish_points > bearish_points:
-            entry = round(close, 2)
-            stop = round(nearest_support * 0.99, 2)
-            risk = max(entry - stop, 0.01)
-            target = round(entry + (risk * 2), 2)
-            rr = round((target - entry) / risk, 2)
+        atr = float(tr.rolling(14).mean().iloc[-1])
+        entry = round(close, 2)
 
-            if close > ma20 > ma50 and last_vol > avg20_vol * 1.3:
-                trade_type = "Day trade / momentum"
-                expected_hold = "Same day to 2 trading days"
-            else:
-                trade_type = "Swing trade"
-                expected_hold = "2 days to 3 weeks"
+        account_size = 5000.0
+        risk_pct = 0.005
+        max_dollar_risk = round(account_size * risk_pct, 2)
 
-            confidence = "Buy" if bullish_points >= 5 and rr >= 2 else "Neutral"
-            explanation = (
-                "The chart leans bullish. Entry is near the current price, "
-                "the stop-loss sits just under support, and the target aims "
-                "for at least twice the risk."
-            )
+        if bullish > bearish:
+            stop = round(entry - (atr * 1.5), 2)
+            target = round(entry + (atr * 3), 2)
+
+            risk_per_share = max(entry - stop, 0.01)
+            reward = target - entry
+            rr = round(reward / risk_per_share, 2)
+
+            max_stop_pct = 0.08
+            if (entry - stop) / entry > max_stop_pct:
+                stop = round(entry * (1 - max_stop_pct), 2)
+                risk_per_share = max(entry - stop, 0.01)
+                target = round(entry + (risk_per_share * 2), 2)
+                rr = round((target - entry) / risk_per_share, 2)
+
+            suggested_shares = max(int(max_dollar_risk // risk_per_share), 1)
+
+            trade_type = "Day trade / momentum" if last_vol > avg20_vol * 1.3 else "Swing trade"
+            expected_hold = "Same day to 2 days" if "Day" in trade_type else "2 days to 3 weeks"
+            confidence = "Buy" if score >= 4 and rr >= 2 else "Neutral"
+
             return TradePlan(
                 bias="Buy",
                 entry_price=entry,
@@ -268,42 +288,42 @@ class BeginnerFriendlyTABot:
                 target_1=target,
                 risk_reward=rr,
                 confidence=confidence,
-                explanation=explanation,
+                explanation="Bullish structure with controlled ATR-based risk.",
                 trade_type=trade_type,
                 expected_hold=expected_hold,
                 score=score,
+                dollars_at_risk=max_dollar_risk,
+                risk_per_share=round(risk_per_share, 2),
+                suggested_shares=suggested_shares,
             )
 
-        if bearish_points > bullish_points:
-            entry = round(close, 2)
-            stop = round(nearest_resistance * 1.01, 2)
-            risk = max(stop - entry, 0.01)
-            target = round(entry - (risk * 2), 2)
-            rr = round((entry - target) / risk, 2)
+        if bearish > bullish:
+            stop = round(entry + (atr * 1.5), 2)
+            target = round(entry - (atr * 3), 2)
 
-            if close < ma20 < ma50 and last_vol > avg20_vol * 1.3:
-                trade_type = "Day trade / downside momentum"
-                expected_hold = "Same day to 2 trading days"
-            else:
-                trade_type = "Weak chart / avoid long"
-                expected_hold = "Avoid unless you actively short trade"
+            risk_per_share = max(stop - entry, 0.01)
+            reward = entry - target
+            rr = round(reward / risk_per_share, 2)
+            suggested_shares = max(int(max_dollar_risk // risk_per_share), 1)
 
-            confidence = "Sell" if bearish_points >= 5 and rr >= 2 else "Neutral"
-            explanation = (
-                "The chart leans bearish. For newer traders, this is usually "
-                "more useful as a warning to avoid buying than a signal to short."
-            )
+            trade_type = "Downside momentum" if last_vol > avg20_vol * 1.3 else "Weak chart"
+            expected_hold = "Short term move"
+            confidence = "Sell" if score <= -4 and rr >= 2 else "Neutral"
+
             return TradePlan(
-                bias="Sell / Avoid Long",
+                bias="Sell / Avoid",
                 entry_price=entry,
                 stop_loss=stop,
                 target_1=target,
                 risk_reward=rr,
                 confidence=confidence,
-                explanation=explanation,
+                explanation="Bearish structure with controlled ATR-based risk.",
                 trade_type=trade_type,
                 expected_hold=expected_hold,
                 score=score,
+                dollars_at_risk=max_dollar_risk,
+                risk_per_share=round(risk_per_share, 2),
+                suggested_shares=suggested_shares,
             )
 
         return TradePlan(
@@ -313,10 +333,13 @@ class BeginnerFriendlyTABot:
             target_1=None,
             risk_reward=None,
             confidence="Neutral",
-            explanation="Signals are mixed, so waiting may be the safest move.",
+            explanation="No clear edge.",
             trade_type="No trade",
-            expected_hold="Wait for a cleaner setup",
+            expected_hold="Wait",
             score=score,
+            dollars_at_risk=None,
+            risk_per_share=None,
+            suggested_shares=None,
         )
 
     @staticmethod
@@ -520,6 +543,152 @@ def save_watchlist(text: str) -> None:
     WATCHLIST_FILE.write_text(cleaned, encoding="utf-8")
 
 
+TRACKER_FILE = Path("paper_trades.json")
+
+
+def load_tracker() -> List[dict]:
+    try:
+        if TRACKER_FILE.exists():
+            return json.loads(TRACKER_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def save_tracker(trades: List[dict]) -> None:
+    TRACKER_FILE.write_text(json.dumps(trades, indent=2), encoding="utf-8")
+
+
+def add_trade_to_tracker(ticker: str, plan: TradePlan) -> None:
+    if plan.entry_price is None or plan.stop_loss is None or plan.target_1 is None:
+        return
+
+    trades = load_tracker()
+    trade_id = f"{ticker.upper()}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    trades.append(
+        {
+            "id": trade_id,
+            "ticker": ticker.upper(),
+            "added_at_utc": datetime.utcnow().isoformat(),
+            "entry": plan.entry_price,
+            "stop": plan.stop_loss,
+            "target": plan.target_1,
+            "bias": plan.bias,
+            "confidence": plan.confidence,
+            "score": plan.score,
+            "trade_type": plan.trade_type,
+            "expected_hold": plan.expected_hold,
+            "status": "OPEN",
+        }
+    )
+    save_tracker(trades)
+
+
+def refresh_tracker_prices(trades: List[dict]) -> List[dict]:
+    if not trades:
+        return trades
+
+    tickers = sorted(set(t["ticker"] for t in trades if t.get("status") == "OPEN"))
+    latest = {}
+    if tickers:
+        try:
+            data = yf.download(tickers=tickers, period="5d", interval="1d", progress=False, auto_adjust=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                close = data["Close"]
+                if hasattr(close, "columns"):
+                    for tk in tickers:
+                        if tk in close.columns and not close[tk].dropna().empty:
+                            latest[tk] = float(close[tk].dropna().iloc[-1])
+                else:
+                    if tickers and not close.dropna().empty:
+                        latest[tickers[0]] = float(close.dropna().iloc[-1])
+            else:
+                if "Close" in data.columns and not data["Close"].dropna().empty and len(tickers) == 1:
+                    latest[tickers[0]] = float(data["Close"].dropna().iloc[-1])
+        except Exception:
+            latest = {}
+
+    for trade in trades:
+        price = latest.get(trade["ticker"])
+        if price is None:
+            continue
+        trade["current_price"] = round(price, 2)
+        entry = float(trade["entry"])
+        stop = float(trade["stop"])
+        target = float(trade["target"])
+        trade["pnl_per_share"] = round(price - entry, 2)
+        trade["pnl_pct"] = round(((price - entry) / entry) * 100, 2)
+
+        if trade["status"] == "OPEN":
+            if price <= stop:
+                trade["status"] = "STOP HIT"
+            elif price >= target:
+                trade["status"] = "TARGET HIT"
+    return trades
+
+
+def run_simple_backtest(bot: BeginnerFriendlyTABot, ticker: str, lookback_bars: int = 180) -> pd.DataFrame:
+    bot.load_data()
+    df = bot.data_daily.copy()
+    if df is None or len(df) < 80:
+        return pd.DataFrame()
+
+    start_idx = max(60, len(df) - lookback_bars)
+    results = []
+
+    for i in range(start_idx, len(df) - 11):
+        hist = df.iloc[: i + 1].copy()
+        supports, resistances = bot.support_resistance(hist)
+        plan = bot.create_trade_plan(hist, supports, resistances)
+
+        if plan.confidence != "Buy" or plan.entry_price is None or plan.stop_loss is None or plan.target_1 is None:
+            continue
+
+        future = df.iloc[i + 1 : i + 11]
+        outcome = "OPEN"
+        exit_price = float(future["Close"].iloc[-1])
+        exit_date = str(future.index[-1].date())
+
+        for dt, row in future.iterrows():
+            low = float(row["Low"])
+            high = float(row["High"])
+            close = float(row["Close"])
+            if low <= plan.stop_loss:
+                outcome = "STOP HIT"
+                exit_price = plan.stop_loss
+                exit_date = str(dt.date())
+                break
+            if high >= plan.target_1:
+                outcome = "TARGET HIT"
+                exit_price = plan.target_1
+                exit_date = str(dt.date())
+                break
+            exit_price = close
+            exit_date = str(dt.date())
+
+        pnl = round(exit_price - plan.entry_price, 2)
+        pnl_pct = round((pnl / plan.entry_price) * 100, 2)
+
+        results.append(
+            {
+                "Signal Date": str(hist.index[-1].date()),
+                "Ticker": ticker.upper(),
+                "Entry": round(plan.entry_price, 2),
+                "Stop": round(plan.stop_loss, 2),
+                "Target": round(plan.target_1, 2),
+                "Exit Date": exit_date,
+                "Exit Price": round(exit_price, 2),
+                "Outcome": outcome,
+                "PnL/Share": pnl,
+                "PnL %": pnl_pct,
+                "Score": plan.score,
+                "R/R": plan.risk_reward,
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
 def main() -> None:
     st.set_page_config(page_title="Beginner Stock TA Dashboard", layout="wide")
     st.title("Beginner-Friendly Stock Technical Analysis Dashboard + Watchlist Scanner")
@@ -528,6 +697,9 @@ def main() -> None:
         "**How to use this:** green means worth considering, yellow means watch or wait, "
         "red means avoid or skip. The tool still uses the stricter logic underneath."
     )
+
+    tracker_trades = refresh_tracker_prices(load_tracker())
+    save_tracker(tracker_trades)
 
     with st.sidebar:
         st.header("Inputs")
@@ -675,7 +847,28 @@ def main() -> None:
         if scan_df.empty:
             st.warning("No tickers passed your current filters. Lower the minimum score or minimum risk/reward to see more names.")
         else:
-            st.dataframe(scan_df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                scan_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ticker": st.column_config.TextColumn("Ticker", help="The stock symbol being scanned."),
+                    "Price": st.column_config.NumberColumn("Price", help="The latest stock price used by the model.", format="$%.2f"),
+                    "Daily Trend": st.column_config.TextColumn("Daily Trend", help="The short-term trend on the daily chart."),
+                    "Weekly Trend": st.column_config.TextColumn("Weekly Trend", help="The medium-term trend on the weekly chart."),
+                    "Bias": st.column_config.TextColumn("Bias", help="The direction the model leans right now."),
+                    "Confidence": st.column_config.TextColumn("Confidence", help="Whether the setup qualifies as Buy, Sell, or Neutral."),
+                    "Score": st.column_config.NumberColumn("Score", help="The setup score. Higher is stronger for bullish setups."),
+                    "Trade Type": st.column_config.TextColumn("Trade Type", help="Whether the move looks more like a day trade or swing trade."),
+                    "Expected Hold": st.column_config.TextColumn("Expected Hold", help="Rough hold window if the setup works."),
+                    "Entry": st.column_config.NumberColumn("Entry", help="The suggested entry price.", format="$%.2f"),
+                    "Stop": st.column_config.NumberColumn("Stop", help="The stop-loss level where the idea is invalid.", format="$%.2f"),
+                    "Target": st.column_config.NumberColumn("Target", help="The first target price.", format="$%.2f"),
+                    "Risk/Reward": st.column_config.NumberColumn("Risk/Reward", help="Expected reward divided by risk. Higher is usually better."),
+                    "RSI": st.column_config.NumberColumn("RSI", help="Momentum reading. Mid-to-high 50s/60s usually support bullish moves."),
+                    "Pattern": st.column_config.TextColumn("Pattern", help="Simple chart pattern the model thinks it sees."),
+                },
+            )
 
             top_pick = scan_df.iloc[0]
             st.markdown("### Best Current Setup From This Scan")
@@ -813,6 +1006,15 @@ def main() -> None:
     for i, step in enumerate(trade_steps, start=1):
         st.write(f"{i}. {step}")
 
+
+    if trade_plan.confidence == "Buy" and trade_plan.entry_price is not None:
+        if st.button("Track This Trade", use_container_width=True):
+            try:
+                add_trade_to_tracker(ticker, trade_plan)
+                st.success("Trade added to paper tracker.")
+            except Exception as exc:
+                st.error(f"Could not add trade to tracker: {exc}")
+
     st.markdown("### Price Chart")
     chart_df = data["chart_df"][["Close", "MA50", "MA100", "MA200", "BB_Upper", "BB_Mid", "BB_Lower"]].dropna()
     st.line_chart(chart_df)
@@ -864,11 +1066,77 @@ def main() -> None:
     plan_col4.metric("Target", f"${trade_plan.target_1:.2f}" if trade_plan.target_1 is not None else "N/A")
     plan_col5.metric("Risk/Reward", f"1:{trade_plan.risk_reward:.2f}" if trade_plan.risk_reward is not None else "N/A")
     plan_col6.metric("Expected Hold", trade_plan.expected_hold)
+    st.write(f"**Max Dollar Risk:** ${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "**Max Dollar Risk:** N/A")
+    st.write(f"**Risk Per Share:** ${trade_plan.risk_per_share:.2f}" if trade_plan.risk_per_share is not None else "**Risk Per Share:** N/A")
+    st.write(f"**Suggested Shares:** {trade_plan.suggested_shares}" if trade_plan.suggested_shares is not None else "**Suggested Shares:** N/A")
 
     st.info("Beginner reminder: a good-looking chart can still fail. The stop-loss is there to protect your account, not to punish you.")
 
     st.markdown("### Simple Rules To Follow")
     st.write("Only take trades when the tool says TAKE TRADE, the score is 3 or better for bullish setups, and risk/reward is 2.0 or better. If it says WATCH or SKIP, do not force the trade.")
+
+
+    st.markdown("### Paper Trade Tracker")
+    if tracker_trades:
+        tracker_df = pd.DataFrame(tracker_trades)
+        display_cols = [
+            c for c in [
+                "ticker", "status", "entry", "stop", "target", "current_price",
+                "pnl_per_share", "pnl_pct", "score", "trade_type", "expected_hold", "added_at_utc"
+            ] if c in tracker_df.columns
+        ]
+        st.dataframe(
+            tracker_df[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "ticker": st.column_config.TextColumn("Ticker", help="Tracked trade ticker."),
+                "status": st.column_config.TextColumn("Status", help="OPEN, TARGET HIT, or STOP HIT."),
+                "entry": st.column_config.NumberColumn("Entry", format="$%.2f", help="Original entry price."),
+                "stop": st.column_config.NumberColumn("Stop", format="$%.2f", help="Original stop-loss."),
+                "target": st.column_config.NumberColumn("Target", format="$%.2f", help="Original target."),
+                "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f", help="Latest tracked price."),
+                "pnl_per_share": st.column_config.NumberColumn("PnL/Share", format="$%.2f", help="How the trade would be doing per share."),
+                "pnl_pct": st.column_config.NumberColumn("PnL %", format="%.2f%%", help="Percentage gain or loss from entry."),
+                "score": st.column_config.NumberColumn("Score", help="Model score when the trade was added."),
+                "trade_type": st.column_config.TextColumn("Trade Type", help="Day trade or swing trade classification."),
+                "expected_hold": st.column_config.TextColumn("Expected Hold", help="Original expected hold window."),
+                "added_at_utc": st.column_config.TextColumn("Added UTC", help="When the tracked trade was saved."),
+            },
+        )
+    else:
+        st.info("No paper trades saved yet. Use 'Track This Trade' on a stock setup to start building results.")
+
+    st.markdown("### Quick Backtest")
+    col_bt1, col_bt2 = st.columns([1, 1])
+    with col_bt1:
+        backtest_ticker = st.text_input("Backtest ticker", value=ticker, key="backtest_ticker").upper().strip()
+    with col_bt2:
+        run_backtest = st.button("Run Simple Backtest", use_container_width=True)
+
+    if run_backtest and backtest_ticker:
+        try:
+            bt_bot = BeginnerFriendlyTABot(backtest_ticker, "watching")
+            bt_df = run_simple_backtest(bt_bot, backtest_ticker, lookback_bars=180)
+            if bt_df.empty:
+                st.warning("No qualifying buy signals found in the backtest window.")
+            else:
+                wins = int((bt_df["Outcome"] == "TARGET HIT").sum())
+                losses = int((bt_df["Outcome"] == "STOP HIT").sum())
+                total = len(bt_df)
+                avg_pnl = round(bt_df["PnL %"].mean(), 2)
+                win_rate = round((wins / total) * 100, 2) if total else 0.0
+
+                a, b, c, d = st.columns(4)
+                a.metric("Signals", total)
+                b.metric("Win Rate", f"{win_rate}%")
+                c.metric("Avg PnL %", f"{avg_pnl}%")
+                d.metric("Stops Hit", losses)
+
+                st.dataframe(bt_df, use_container_width=True, hide_index=True)
+                st.caption("Simple backtest: long-only buy signals, hold up to 10 trading days, exits at stop or target if hit.")
+        except Exception as exc:
+            st.error(f"Backtest failed: {exc}")
 
     st.markdown("### Institutional-Style Reality Check")
     st.write("This dashboard can rank and explain strong technical setups across a watchlist, but it does not have access to nonpublic information, hedge fund live order flow, or politician-only knowledge. Its edge comes from disciplined filtering, risk control, and avoiding weak trades.")
