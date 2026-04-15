@@ -1051,13 +1051,19 @@ def main() -> None:
         st.markdown("### Volume Read")
         st.write(data["volume_text"])
 
-    st.markdown("### Fibonacci Levels")
-    fib_df = pd.DataFrame([{"Level": k, "Price": v} for k, v in data["fib"].items()])
-    st.dataframe(fib_df, use_container_width=True, hide_index=True)
-    st.caption("These can act like possible bounce or pullback zones.")
+        st.markdown("### Trade Plan Summary")
 
-    st.markdown("### Trade Plan Summary")
-    st.caption("This is the simplest reading: entry is where you buy, stop-loss is where you exit if wrong, target is where you plan to get paid.")
+        if trade_plan.suggested_shares is not None:
+            st.markdown("### Position Size")
+            st.success(
+                f"Buy **{trade_plan.suggested_shares} shares** at **${trade_plan.entry_price:.2f}**"
+            )
+            st.write(f"**Max Dollar Risk:** ${trade_plan.dollars_at_risk:.2f}")
+            st.write(f"**Risk Per Share:** ${trade_plan.risk_per_share:.2f}")
+        else:
+            st.info("No position size available because there is no active trade setup.")
+
+        st.caption("This is the simplest reading: entry is where you buy, stop-loss is where you exit if wrong, target is where you plan to get paid.")
 
     plan_col1, plan_col2, plan_col3, plan_col4, plan_col5, plan_col6 = st.columns(6)
     plan_col1.metric("Bias", trade_plan.bias)
