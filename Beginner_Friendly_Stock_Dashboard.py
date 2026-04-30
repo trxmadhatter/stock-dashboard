@@ -1447,6 +1447,94 @@ def add_option_trade_from_row(
     )
 
 
+
+
+def calculate_option_exit_profit_plan(
+    trade: Dict[str, object],
+    profit_target_pct: float,
+    stop_loss_pct: float,
+) -> Dict[str, object]:
+    """Add beginner-friendly option exit/profit targets for long calls and puts.
+
+    This uses two simple beginner rules:
+    1. Take-profit price is based on the user's desired option gain percentage.
+    2. Cut-loss price is based on the user's max option loss percentage.
+
+    When a stock target exists, it also estimates the option's intrinsic value at
+    that stock target. That number is not guaranteed because options also depend
+    on time value, volatility, and bid/ask spread, but it is useful for planning.
+    """
+    entry_cost = safe_float(trade.get("entry_contract_cost"))
+    contracts = max(safe_int(trade.get("contracts"), 1), 1)
+    strike = safe_float(trade.get("strike"))
+    stock_target = trade.get("stock_target")
+    option_type = str(trade.get("option_type", "")).upper()
+
+    plan: Dict[str, object] = {
+        "take_profit_contract_cost": np.nan,
+        "take_profit_total_value": np.nan,
+        "take_profit_dollars": np.nan,
+        "take_profit_pct": np.nan,
+        "cut_loss_contract_cost": np.nan,
+        "cut_loss_total_value": np.nan,
+        "cut_loss_dollars": np.nan,
+        "cut_loss_pct": np.nan,
+        "target_contract_value_est": np.nan,
+        "target_total_value_est": np.nan,
+        "target_profit_dollars_est": np.nan,
+        "target_profit_pct_est": np.nan,
+        "target_profit_note": "Add a stock target to estimate profit at target.",
+    }
+
+    if entry_cost <= 0:
+        return plan
+
+    take_profit_contract = round(entry_cost * (1 + abs(float(profit_target_pct)) / 100), 2)
+    cut_loss_contract = round(max(entry_cost * (1 - abs(float(stop_loss_pct)) / 100), 0.01), 2)
+
+    plan.update(
+        {
+            "take_profit_contract_cost": take_profit_contract,
+            "take_profit_total_value": round(take_profit_contract * contracts, 2),
+            "take_profit_dollars": round((take_profit_contract - entry_cost) * contracts, 2),
+            "take_profit_pct": round(((take_profit_contract - entry_cost) / entry_cost) * 100, 2),
+            "cut_loss_contract_cost": cut_loss_contract,
+            "cut_loss_total_value": round(cut_loss_contract * contracts, 2),
+            "cut_loss_dollars": round((cut_loss_contract - entry_cost) * contracts, 2),
+            "cut_loss_pct": round(((cut_loss_contract - entry_cost) / entry_cost) * 100, 2),
+        }
+    )
+
+    if stock_target not in [None, "", 0, 0.0] and strike > 0:
+        try:
+            target_stock = float(stock_target)
+            if option_type == "CALL":
+                estimated_contract_value = max(target_stock - strike, 0) * 100
+            elif option_type == "PUT":
+                estimated_contract_value = max(strike - target_stock, 0) * 100
+            else:
+                estimated_contract_value = np.nan
+
+            if not pd.isna(estimated_contract_value):
+                estimated_contract_value = round(float(estimated_contract_value), 2)
+                target_profit = round((estimated_contract_value - entry_cost) * contracts, 2)
+                target_pct = round(((estimated_contract_value - entry_cost) / entry_cost) * 100, 2)
+                plan.update(
+                    {
+                        "target_contract_value_est": estimated_contract_value,
+                        "target_total_value_est": round(estimated_contract_value * contracts, 2),
+                        "target_profit_dollars_est": target_profit,
+                        "target_profit_pct_est": target_pct,
+                        "target_profit_note": (
+                            "Rough intrinsic-value estimate at the stock target. Real option price can differ because of time value, IV, and spread."
+                        ),
+                    }
+                )
+        except Exception:
+            pass
+
+    return plan
+
 def option_exit_recommendation(
     trade: Dict[str, object],
     profit_target_pct: float,
@@ -1572,6 +1660,9 @@ def refresh_option_tracker_prices(
                 intrinsic = max(strike - float(current_stock), 0) * 100 * contracts
             trade["intrinsic_value"] = round(intrinsic, 2)
 
+        # Beginner-friendly option plan: target profit, cut-loss price, and rough target-value estimate.
+        trade.update(calculate_option_exit_profit_plan(trade, profit_target_pct, stop_loss_pct))
+
         rec, rec_type, rec_reason = option_exit_recommendation(trade, profit_target_pct, stop_loss_pct, force_close_dte)
         trade["exit_recommendation"] = rec
         trade["exit_recommendation_type"] = rec_type
@@ -1614,12 +1705,42 @@ def render_manual_option_add_form() -> None:
             manual_stock_entry = e1.number_input("Optional stock entry", min_value=0.0, max_value=10000.0, value=0.0, step=0.5)
             manual_stock_stop = e2.number_input("Optional stock stop", min_value=0.0, max_value=10000.0, value=0.0, step=0.5)
             manual_stock_target = e3.number_input("Optional stock target", min_value=0.0, max_value=10000.0, value=0.0, step=0.5)
+            auto_fill_plan = st.checkbox(
+                "Auto-fill stock stop/target from dashboard if I leave them blank",
+                value=True,
+                help="Useful when manually adding a Robinhood option. The app will try to pull the ticker chart and save the matching stock stop/target for exit guidance.",
+            )
 
             submitted = st.form_submit_button("Add Option To Tracker", use_container_width=True)
             if submitted:
                 if not manual_ticker or not manual_exp:
                     st.error("Ticker and expiration are required.")
                 else:
+                    stock_entry_val = manual_stock_entry if manual_stock_entry > 0 else None
+                    stock_stop_val = manual_stock_stop if manual_stock_stop > 0 else None
+                    stock_target_val = manual_stock_target if manual_stock_target > 0 else None
+                    stock_bias_val = "manual"
+                    stock_score_val = None
+
+                    if auto_fill_plan and (stock_entry_val is None or stock_stop_val is None or stock_target_val is None):
+                        try:
+                            auto_bot = BeginnerFriendlyTABot(ticker=manual_ticker, position="watching")
+                            auto_snap = auto_bot.build_snapshot()
+                            auto_plan: TradePlan = auto_snap["trade_plan"]
+                            auto_bias = str(auto_plan.bias)
+                            is_matching_direction = (
+                                (manual_type == "CALL" and auto_bias.startswith("Buy"))
+                                or (manual_type == "PUT" and "Sell" in auto_bias)
+                            )
+                            if is_matching_direction and auto_plan.entry_price is not None:
+                                stock_entry_val = stock_entry_val or auto_plan.entry_price
+                                stock_stop_val = stock_stop_val or auto_plan.stop_loss
+                                stock_target_val = stock_target_val or auto_plan.target_1
+                                stock_bias_val = auto_plan.bias
+                                stock_score_val = auto_plan.score
+                        except Exception:
+                            pass
+
                     add_option_trade(
                         ticker=manual_ticker,
                         option_type=manual_type,
@@ -1627,10 +1748,11 @@ def render_manual_option_add_form() -> None:
                         strike=manual_strike,
                         entry_contract_cost=manual_cost,
                         contracts=int(manual_contracts),
-                        stock_entry=manual_stock_entry if manual_stock_entry > 0 else None,
-                        stock_stop=manual_stock_stop if manual_stock_stop > 0 else None,
-                        stock_target=manual_stock_target if manual_stock_target > 0 else None,
-                        stock_bias="manual",
+                        stock_entry=stock_entry_val,
+                        stock_stop=stock_stop_val,
+                        stock_target=stock_target_val,
+                        stock_bias=stock_bias_val,
+                        stock_score=stock_score_val,
                         source=manual_source,
                     )
                     go_to_option_tracker(
@@ -1667,6 +1789,31 @@ def render_option_tracker(
     closed_trades = [t for t in option_trades if str(t.get("status", "OPEN")).upper() != "OPEN"]
 
     if open_trades:
+        exit_alerts = [
+            t for t in open_trades
+            if any(word in str(t.get("exit_recommendation", "")).upper() for word in ["SELL", "CUT", "TAKE PROFIT", "EXPIRED"])
+        ]
+        watch_alerts = [
+            t for t in open_trades
+            if "WATCH CLOSELY" in str(t.get("exit_recommendation", "")).upper()
+        ]
+
+        st.markdown("### Tracker Alert Summary")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Open Option Trades", len(open_trades))
+        a2.metric("Exit Alerts", len(exit_alerts))
+        a3.metric("Watch Closely", len(watch_alerts))
+
+        if exit_alerts:
+            st.error(
+                "Exit alert active: at least one option hit a take-profit, cut-loss, stock-target, or expiration-risk rule. "
+                "Review the trade cards below and use SELL TO CLOSE in your broker if you decide to exit."
+            )
+        elif watch_alerts:
+            st.warning("No hard exit trigger yet, but at least one option is close enough to expiration that you should watch it closely.")
+        else:
+            st.info("No exit trigger has fired yet based on your current rules.")
+
         st.markdown("### Open Option Trades")
         for trade in open_trades:
             rec = str(trade.get("exit_recommendation", "HOLD / WATCH"))
@@ -1692,6 +1839,32 @@ def render_option_tracker(
                 n2.markdown(f"**DTE**  \n{trade.get('dte', 'N/A')}")
                 n3.markdown(f"**Bid / Ask / Mid**  \n${safe_float(trade.get('bid')):.2f} / ${safe_float(trade.get('ask')):.2f} / ${safe_float(trade.get('mid')):.2f}")
                 n4.markdown(f"**Volume / OI**  \n{safe_int(trade.get('volume'))} / {safe_int(trade.get('open_interest'))}")
+
+                st.markdown("**Potential Profit / Exit Plan**")
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric(
+                    "Suggested Take Profit",
+                    f"${safe_float(trade.get('take_profit_contract_cost')):.2f}",
+                    help="Option contract value where your take-profit rule fires.",
+                )
+                p2.metric(
+                    "Suggested Cut Loss",
+                    f"${safe_float(trade.get('cut_loss_contract_cost')):.2f}",
+                    help="Option contract value where your cut-loss rule fires.",
+                )
+                target_est = safe_float(trade.get('target_contract_value_est'), default=float('nan'))
+                if pd.isna(target_est):
+                    p3.metric("Est. Value At Stock Target", "N/A")
+                    p4.metric("Est. Profit At Target", "N/A")
+                else:
+                    p3.metric("Est. Value At Stock Target", f"${target_est:.2f}")
+                    p4.metric(
+                        "Est. Profit At Target",
+                        f"${safe_float(trade.get('target_profit_dollars_est')):.2f}",
+                        f"{safe_float(trade.get('target_profit_pct_est')):.1f}%",
+                    )
+
+                st.caption(str(trade.get("target_profit_note", "")))
 
                 if rec_type == "success":
                     st.success(f"Recommendation: {rec} — {rec_reason}")
@@ -1720,6 +1893,8 @@ def render_option_tracker(
             "ticker", "option_type", "expiration", "strike", "status", "contracts",
             "entry_contract_cost", "current_contract_cost", "entry_total_cost", "current_total_value",
             "pnl_dollars", "pnl_pct", "dte", "current_stock_price", "stock_stop", "stock_target",
+            "take_profit_contract_cost", "cut_loss_contract_cost", "target_contract_value_est",
+            "target_profit_dollars_est", "target_profit_pct_est",
             "exit_recommendation", "exit_reason", "bid", "ask", "mid", "volume", "open_interest",
             "contract_symbol", "added_at_utc", "closed_at_utc",
         ] if c in tracker_df.columns
@@ -1738,6 +1913,11 @@ def render_option_tracker(
             "current_stock_price": st.column_config.NumberColumn("Stock Price", format="$%.2f"),
             "stock_stop": st.column_config.NumberColumn("Stock Stop", format="$%.2f"),
             "stock_target": st.column_config.NumberColumn("Stock Target", format="$%.2f"),
+            "take_profit_contract_cost": st.column_config.NumberColumn("Take Profit", format="$%.2f"),
+            "cut_loss_contract_cost": st.column_config.NumberColumn("Cut Loss", format="$%.2f"),
+            "target_contract_value_est": st.column_config.NumberColumn("Est. Target Value", format="$%.2f"),
+            "target_profit_dollars_est": st.column_config.NumberColumn("Est. Profit At Target", format="$%.2f"),
+            "target_profit_pct_est": st.column_config.NumberColumn("Est. Profit %", format="%.2f%%"),
             "bid": st.column_config.NumberColumn("Bid", format="$%.2f"),
             "ask": st.column_config.NumberColumn("Ask", format="$%.2f"),
             "mid": st.column_config.NumberColumn("Mid", format="$%.2f"),
