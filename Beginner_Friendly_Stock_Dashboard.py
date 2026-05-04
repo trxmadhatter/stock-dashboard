@@ -290,7 +290,7 @@ class BeginnerFriendlyTABot:
         elif ma50 < ma100 < ma200:
             bearish += 2
 
-        if 50 <= rsi_value <= 65:
+        if 50 <= rsi_value <= 70:
             bullish += 1
         elif rsi_value < 45:
             bearish += 1
