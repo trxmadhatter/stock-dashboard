@@ -569,10 +569,14 @@ def score_option_contract(
     implied_volatility = safe_float(row.get("impliedVolatility"))
     contract_symbol = str(row.get("contractSymbol", ""))
 
+    price_is_stale = False
     if bid > 0 and ask > 0:
         mid = round((bid + ask) / 2, 2)
-    else:
+    elif last_price > 0:
         mid = round(last_price, 2)
+        price_is_stale = True
+    else:
+        mid = 0.0
 
     spread = max(ask - bid, 0.0) if ask > 0 and bid > 0 else 0.0
     spread_pct = round(spread / mid, 4) if mid > 0 else 999.0
@@ -600,6 +604,8 @@ def score_option_contract(
         warnings.append("No usable option price.")
     if bid <= 0 or ask <= 0:
         warnings.append("Bid/ask is incomplete.")
+    if price_is_stale:
+        warnings.append("No live bid/ask — using last sale price, which may be stale.")
     if volume >= min_volume:
         liquidity_score += 2
     else:
@@ -639,11 +645,14 @@ def score_option_contract(
     final_score = liquidity_score + risk_score
     grade = option_grade(final_score)
 
+    critical_warnings = {"No usable option price.", "Bid/ask is incomplete.", "No live bid/ask — using last sale price, which may be stale.", "IV was missing from the chain."}
+    has_critical = any(w in critical_warnings for w in warnings)
+
     if final_score >= 9 and not warnings:
         action = "CONSIDER"
-    elif final_score >= 7:
+    elif final_score >= 7 and not has_critical:
         action = "WATCH / SMALL SIZE"
-    elif final_score >= 5:
+    elif final_score >= 5 and not has_critical:
         action = "RISKY"
     else:
         action = "AVOID"
