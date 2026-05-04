@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -55,6 +56,9 @@ class OptionCandidate:
     grade: str
     action: str
     warnings: List[str]
+    delta: Optional[float] = None
+    theta_per_day: Optional[float] = None
+    prob_itm: Optional[float] = None
 
 
 class BeginnerFriendlyTABot:
@@ -580,6 +584,38 @@ def safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _norm_cdf(x: float) -> float:
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def bs_greeks(
+    s: float, k: float, dte: int, iv: float, option_type: str, r: float = 0.05
+) -> Tuple[Optional[float], Optional[float]]:
+    """Return (delta, daily_theta_per_contract). Returns (None, None) on bad inputs."""
+    t = dte / 365.0
+    if t <= 0 or iv <= 0 or s <= 0 or k <= 0:
+        return None, None
+    try:
+        d1 = (math.log(s / k) + (r + 0.5 * iv ** 2) * t) / (iv * math.sqrt(t))
+        d2 = d1 - iv * math.sqrt(t)
+        if option_type == "call":
+            delta = _norm_cdf(d1)
+            theta_annual = (-s * _norm_pdf(d1) * iv / (2 * math.sqrt(t))
+                            - r * k * math.exp(-r * t) * _norm_cdf(d2))
+        else:
+            delta = _norm_cdf(d1) - 1.0
+            theta_annual = (-s * _norm_pdf(d1) * iv / (2 * math.sqrt(t))
+                            + r * k * math.exp(-r * t) * _norm_cdf(-d2))
+        theta_per_day = round(theta_annual / 365.0 * 100, 4)  # per contract (×100 shares)
+        return round(delta, 4), theta_per_day
+    except Exception:
+        return None, None
+
+
 def option_grade(score: int) -> str:
     if score >= 9:
         return "A"
@@ -655,6 +691,9 @@ def score_option_contract(
     suggested_contracts = max(0, min(suggested_contracts, max_contracts))
     max_loss = round(premium_per_contract * suggested_contracts, 2)
 
+    delta, theta_per_day = bs_greeks(current_price, strike, days_to_expiration, implied_volatility, option_type)
+    prob_itm = round(abs(delta) * 100, 1) if delta is not None else None
+
     liquidity_score = 0
     risk_score = 0
     warnings: List[str] = []
@@ -702,6 +741,18 @@ def score_option_contract(
         risk_score += 1
     else:
         warnings.append("Contract is too expensive for your current risk setting.")
+    if delta is not None:
+        abs_delta = abs(delta)
+        if 0.30 <= abs_delta <= 0.60:
+            risk_score += 1
+        elif abs_delta < 0.15:
+            warnings.append(f"Delta too low ({delta:.2f}) — near-zero chance of expiring in the money.")
+        elif abs_delta < 0.20:
+            warnings.append(f"Delta is {delta:.2f} — low probability of expiring in the money.")
+    if theta_per_day is not None and premium_per_contract > 0:
+        daily_decay_pct = abs(theta_per_day) / premium_per_contract * 100
+        if daily_decay_pct > 3.0:
+            warnings.append(f"Theta decay is {daily_decay_pct:.1f}% of premium per day — time is working against you fast.")
 
     final_score = liquidity_score + risk_score
     grade = option_grade(final_score)
@@ -712,6 +763,7 @@ def score_option_contract(
         "No live bid/ask",
         "IV was missing from the chain.",
         "Breakeven requires",
+        "Delta too low",
     )
     has_critical = any(w.startswith(critical_warning_prefixes) for w in warnings)
 
@@ -751,6 +803,9 @@ def score_option_contract(
         grade=grade,
         action=action,
         warnings=warnings,
+        delta=delta,
+        theta_per_day=theta_per_day,
+        prob_itm=prob_itm,
     )
 
 
@@ -880,6 +935,9 @@ def find_option_candidates(
                 "Open Interest": c.open_interest,
                 "IV %": c.implied_volatility * 100,
                 "Spread %": c.spread_pct * 100,
+                "Delta": c.delta,
+                "Theta/Day": c.theta_per_day,
+                "Prob ITM %": c.prob_itm,
                 "Liquidity Score": c.liquidity_score,
                 "Risk Score": c.risk_score,
                 "Contract": c.contract_symbol,
@@ -1012,7 +1070,8 @@ def render_options_section(
     display_cols = [
         "Action", "Grade", "Score", "Type", "Expiration", "DTE", "Strike", "Bid", "Ask", "Mid",
         "Premium/Contract", "Suggested Contracts", "Max Loss", "Breakeven", "Breakeven Move %",
-        "Target Clears BE", "Volume", "Open Interest", "IV %", "Spread %", "Warnings", "Contract",
+        "Target Clears BE", "Delta", "Theta/Day", "Prob ITM %", "Volume", "Open Interest",
+        "IV %", "Spread %", "Warnings", "Contract",
     ]
     st.dataframe(
         options_df[display_cols].head(20),
@@ -1029,6 +1088,9 @@ def render_options_section(
             "Breakeven Move %": st.column_config.NumberColumn("BE Move %", format="%.2f%%"),
             "IV %": st.column_config.NumberColumn("IV %", format="%.1f%%"),
             "Spread %": st.column_config.NumberColumn("Spread %", format="%.1f%%"),
+            "Delta": st.column_config.NumberColumn("Delta", format="%.2f"),
+            "Theta/Day": st.column_config.NumberColumn("Theta/Day ($)", format="$%.2f"),
+            "Prob ITM %": st.column_config.NumberColumn("Prob ITM %", format="%.1f%%"),
         },
     )
 
@@ -1038,7 +1100,9 @@ def render_options_section(
             "- Avoid wide bid/ask spreads because they can make you start the trade at a loss.\n"
             "- Avoid contracts where the stock target does not clear the option breakeven.\n"
             "- Keep the premium small enough that one bad trade does not hurt the account.\n"
-            "- Prefer 7 to 60 days to expiration for beginner-friendly swing ideas."
+            "- Prefer 7 to 60 days to expiration for beginner-friendly swing ideas.\n"
+            "- Delta shows the probability of expiring in the money. Prefer 0.30 to 0.60 for calls, -0.60 to -0.30 for puts.\n"
+            "- Theta/Day shows how much the option loses in value each day just from time passing. Smaller is better."
         )
 
 
