@@ -236,23 +236,54 @@ class BeginnerFriendlyTABot:
         highs = df["High"].tail(80).reset_index(drop=True)
         lows = df["Low"].tail(80).reset_index(drop=True)
 
-        if len(closes) < 40:
-            return "No clear pattern"
+        if len(closes) < 60:
+            return "Not enough data to detect a pattern"
 
-        recent_high = highs.tail(20).max()
-        earlier_high = highs.iloc[20:60].max() if len(highs) >= 60 else highs.head(20).max()
-        recent_low = lows.tail(20).min()
-        earlier_low = lows.iloc[20:60].min() if len(lows) >= 60 else lows.head(20).min()
+        pivot_window = 5
+        n = len(closes)
+        pivot_highs: List[Tuple[float, int]] = []
+        pivot_lows: List[Tuple[float, int]] = []
 
-        if abs(recent_high - earlier_high) / max(recent_high, 1) < 0.02 and recent_low > earlier_low:
-            return "Possible ascending triangle"
-        if abs(recent_low - earlier_low) / max(abs(recent_low), 1) < 0.02 and recent_high < earlier_high:
-            return "Possible descending triangle"
-        if closes.iloc[-1] > closes.iloc[-20] > closes.iloc[-40]:
-            return "Uptrend continuation"
-        if closes.iloc[-1] < closes.iloc[-20] < closes.iloc[-40]:
-            return "Downtrend continuation"
-        return "No major chart pattern confirmed"
+        for i in range(pivot_window, n - pivot_window):
+            if highs[i] >= max(highs[i - pivot_window:i]) and highs[i] >= max(highs[i + 1:i + pivot_window + 1]):
+                pivot_highs.append((float(highs[i]), i))
+            if lows[i] <= min(lows[i - pivot_window:i]) and lows[i] <= min(lows[i + 1:i + pivot_window + 1]):
+                pivot_lows.append((float(lows[i]), i))
+
+        if len(pivot_highs) >= 2 and len(pivot_lows) >= 2:
+            recent_ph = sorted(pivot_highs, key=lambda x: x[1])[-3:]
+            recent_pl = sorted(pivot_lows, key=lambda x: x[1])[-3:]
+            ph_prices = [p for p, _ in recent_ph]
+            pl_prices = [p for p, _ in recent_pl]
+
+            # Ascending triangle: flat resistance (highs within 3%) + rising lows
+            ph_range = (max(ph_prices) - min(ph_prices)) / max(ph_prices)
+            lows_rising = all(pl_prices[i] < pl_prices[i + 1] for i in range(len(pl_prices) - 1))
+            if ph_range < 0.03 and lows_rising and len(ph_prices) >= 2:
+                return "Possible ascending triangle — flat resistance with rising lows"
+
+            # Descending triangle: flat support (lows within 3%) + falling highs
+            pl_range = (max(pl_prices) - min(pl_prices)) / max(pl_prices)
+            highs_falling = all(ph_prices[i] > ph_prices[i + 1] for i in range(len(ph_prices) - 1))
+            if pl_range < 0.03 and highs_falling and len(pl_prices) >= 2:
+                return "Possible descending triangle — flat support with falling highs"
+
+            # Consolidation: both highs and lows bunched tight
+            if ph_range < 0.04 and pl_range < 0.04:
+                return "Consolidation / range — price is coiling, watch for a breakout"
+
+            # Trend structure: higher highs + higher lows = uptrend; lower highs + lower lows = downtrend
+            if len(recent_ph) >= 2 and len(recent_pl) >= 2:
+                hh = ph_prices[-1] > ph_prices[0]
+                hl = pl_prices[-1] > pl_prices[0]
+                lh = ph_prices[-1] < ph_prices[0]
+                ll = pl_prices[-1] < pl_prices[0]
+                if hh and hl:
+                    return "Uptrend structure — higher highs and higher lows"
+                if lh and ll:
+                    return "Downtrend structure — lower highs and lower lows"
+
+        return "No confirmed pattern — mixed or choppy price action"
 
     def create_trade_plan(
         self, df: pd.DataFrame, supports: List[float], resistances: List[float]
