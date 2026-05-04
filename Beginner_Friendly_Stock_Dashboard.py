@@ -152,24 +152,49 @@ class BeginnerFriendlyTABot:
 
     @staticmethod
     def support_resistance(
-        df: pd.DataFrame, lookback: int = 120
+        df: pd.DataFrame, lookback: int = 120, pivot_window: int = 5
     ) -> Tuple[List[float], List[float]]:
-        recent = df.tail(lookback).copy()
-        closes = recent["Close"]
-        highs = recent["High"]
-        lows = recent["Low"]
-        current = closes.iloc[-1]
+        recent = df.tail(lookback).copy().reset_index(drop=True)
+        highs = recent["High"].values
+        lows = recent["Low"].values
+        current = float(recent["Close"].iloc[-1])
+        n = len(highs)
 
-        candidate_supports = sorted(set(round(x, 2) for x in lows.nsmallest(12).tolist()))
-        candidate_resistances = sorted(set(round(x, 2) for x in highs.nlargest(12).tolist()))
+        pivot_highs: List[Tuple[float, int]] = []
+        pivot_lows: List[Tuple[float, int]] = []
 
-        supports = [x for x in candidate_supports if x < current][-3:]
-        resistances = [x for x in candidate_resistances if x > current][:3]
+        for i in range(pivot_window, n - pivot_window):
+            if highs[i] >= max(highs[i - pivot_window:i]) and highs[i] >= max(highs[i + 1:i + pivot_window + 1]):
+                pivot_highs.append((float(highs[i]), i))
+            if lows[i] <= min(lows[i - pivot_window:i]) and lows[i] <= min(lows[i + 1:i + pivot_window + 1]):
+                pivot_lows.append((float(lows[i]), i))
+
+        def cluster_and_score(pivots: List[Tuple[float, int]], tolerance: float = 0.015) -> List[float]:
+            if not pivots:
+                return []
+            pivots_sorted = sorted(pivots, key=lambda x: x[0])
+            clusters: List[List[Tuple[float, int]]] = [[pivots_sorted[0]]]
+            for price, idx in pivots_sorted[1:]:
+                ref = sum(p for p, _ in clusters[-1]) / len(clusters[-1])
+                if abs(price - ref) / ref <= tolerance:
+                    clusters[-1].append((price, idx))
+                else:
+                    clusters.append([(price, idx)])
+            scored: List[Tuple[float, float]] = []
+            for cluster in clusters:
+                level = sum(p for p, _ in cluster) / len(cluster)
+                touches = len(cluster)
+                recency = max(idx for _, idx in cluster) / n
+                scored.append((round(level, 2), touches + recency))
+            return [lvl for lvl, _ in sorted(scored, key=lambda x: -x[1])]
+
+        supports = sorted([l for l in cluster_and_score(pivot_lows) if l < current], reverse=True)[:3]
+        resistances = sorted([l for l in cluster_and_score(pivot_highs) if l > current])[:3]
 
         if not supports:
-            supports = [round(float(lows.min()), 2)]
+            supports = [round(float(recent["Low"].min()), 2)]
         if not resistances:
-            resistances = [round(float(highs.max()), 2)]
+            resistances = [round(float(recent["High"].max()), 2)]
 
         return supports, resistances
 
