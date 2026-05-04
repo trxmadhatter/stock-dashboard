@@ -559,6 +559,7 @@ def score_option_contract(
     min_open_interest: int,
     max_spread_pct: float,
     max_iv: float,
+    max_breakeven_move_pct: float = 15.0,
 ) -> OptionCandidate:
     strike = safe_float(row.get("strike"))
     bid = safe_float(row.get("bid"))
@@ -606,6 +607,8 @@ def score_option_contract(
         warnings.append("Bid/ask is incomplete.")
     if price_is_stale:
         warnings.append("No live bid/ask — using last sale price, which may be stale.")
+    if breakeven_move_pct > max_breakeven_move_pct:
+        warnings.append(f"Breakeven requires a {breakeven_move_pct:.1f}% move — too far out of the money for a beginner trade.")
     if volume >= min_volume:
         liquidity_score += 2
     else:
@@ -645,8 +648,14 @@ def score_option_contract(
     final_score = liquidity_score + risk_score
     grade = option_grade(final_score)
 
-    critical_warnings = {"No usable option price.", "Bid/ask is incomplete.", "No live bid/ask — using last sale price, which may be stale.", "IV was missing from the chain."}
-    has_critical = any(w in critical_warnings for w in warnings)
+    critical_warning_prefixes = (
+        "No usable option price.",
+        "Bid/ask is incomplete.",
+        "No live bid/ask",
+        "IV was missing from the chain.",
+        "Breakeven requires",
+    )
+    has_critical = any(w.startswith(critical_warning_prefixes) for w in warnings)
 
     if final_score >= 9 and not warnings:
         action = "CONSIDER"
@@ -701,6 +710,7 @@ def find_option_candidates(
     max_iv: float,
     max_option_premium: float,
     max_contracts: int,
+    max_breakeven_move_pct: float = 15.0,
     max_expirations_to_check: int = 6,
 ) -> Tuple[pd.DataFrame, str, List[str]]:
     option_type, strategy_text = option_strategy_text(plan)
@@ -775,6 +785,7 @@ def find_option_candidates(
                     min_open_interest=min_open_interest,
                     max_spread_pct=max_spread_pct,
                     max_iv=max_iv,
+                    max_breakeven_move_pct=max_breakeven_move_pct,
                 )
                 candidates.append(candidate)
         except Exception as exc:
@@ -843,6 +854,7 @@ def render_options_section(
     max_iv: float,
     max_option_premium: float,
     max_contracts: int,
+    max_breakeven_move_pct: float = 15.0,
 ) -> None:
     st.markdown("## Options Mode")
     st.caption(
@@ -875,6 +887,7 @@ def render_options_section(
             max_iv=max_iv,
             max_option_premium=max_option_premium,
             max_contracts=max_contracts,
+            max_breakeven_move_pct=max_breakeven_move_pct,
         )
 
     st.info(strategy_text)
@@ -2382,6 +2395,7 @@ def main() -> None:
         max_spread_pct_display = st.number_input("Max Bid/Ask Spread (%)", min_value=1.0, max_value=100.0, value=20.0, step=1.0)
         max_iv_display = st.number_input("Max Implied Volatility (%)", min_value=1.0, max_value=300.0, value=120.0, step=5.0)
         max_option_premium = st.number_input("Max Premium Per Contract ($)", min_value=1.0, max_value=10000.0, value=250.0, step=25.0)
+        max_breakeven_move_pct = st.number_input("Max Breakeven Move Required (%)", min_value=1.0, max_value=50.0, value=15.0, step=1.0, help="Contracts requiring a larger stock move to break even will be flagged as too far OTM.")
         max_option_contracts = st.number_input("Max Contracts", min_value=1, max_value=100, value=2, step=1)
         only_options_that_fit_account = st.checkbox(
             "Only Show Options That Fit My Account",
@@ -2569,6 +2583,7 @@ def main() -> None:
                     max_iv=max_iv,
                     max_option_premium=max_option_premium,
                     max_contracts=max_option_contracts,
+                    max_breakeven_move_pct=max_breakeven_move_pct,
                 )
 
                 if options_df.empty:
@@ -2836,6 +2851,7 @@ def main() -> None:
             max_iv=max_iv,
             max_option_premium=max_option_premium,
             max_contracts=max_option_contracts,
+            max_breakeven_move_pct=max_breakeven_move_pct,
         )
 
     st.markdown("### Exactly What To Do")
