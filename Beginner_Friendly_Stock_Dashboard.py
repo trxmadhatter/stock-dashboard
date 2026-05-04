@@ -321,6 +321,8 @@ class BeginnerFriendlyTABot:
         ).max(axis=1)
 
         atr = float(tr.rolling(14).mean().iloc[-1])
+        is_day_trade = last_vol > avg20_vol * 1.3
+        effective_atr = atr * 0.5 if is_day_trade else atr
         entry = round(close, 2)
 
         account_size = self.account_size
@@ -328,7 +330,7 @@ class BeginnerFriendlyTABot:
         max_dollar_risk = round(account_size * risk_pct, 2)
 
         if bullish > bearish:
-            atr_stop = round(entry - (atr * 1.5), 2)
+            atr_stop = round(entry - (effective_atr * 1.5), 2)
             nearest_sup = max((s for s in supports if s < entry), default=None)
             if nearest_sup is not None and nearest_sup > atr_stop:
                 stop = round(nearest_sup * 0.99, 2)
@@ -340,7 +342,7 @@ class BeginnerFriendlyTABot:
 
             risk_per_share = max(entry - stop, 0.01)
 
-            atr_target = round(entry + (atr * 3), 2)
+            atr_target = round(entry + (effective_atr * 3), 2)
             nearest_res = min((r for r in resistances if r > entry), default=None)
             if nearest_res is not None and nearest_res < atr_target and (nearest_res - entry) >= risk_per_share * 1.5:
                 target = round(nearest_res * 0.99, 2)
@@ -351,7 +353,7 @@ class BeginnerFriendlyTABot:
             rr = round(reward / risk_per_share, 2)
 
             suggested_shares = max(int(max_dollar_risk // risk_per_share), 1)
-            trade_type = "Day trade / momentum" if last_vol > avg20_vol * 1.3 else "Swing trade"
+            trade_type = "Day trade / momentum" if is_day_trade else "Swing trade"
             expected_hold = "Same day to 2 days" if "Day" in trade_type else "2 days to 3 weeks"
             confidence = "Buy" if score >= 4 and rr >= 1.5 else "Neutral"
 
@@ -372,7 +374,7 @@ class BeginnerFriendlyTABot:
             )
 
         if bearish > bullish:
-            atr_stop = round(entry + (atr * 1.5), 2)
+            atr_stop = round(entry + (effective_atr * 1.5), 2)
             nearest_res = min((r for r in resistances if r > entry), default=None)
             if nearest_res is not None and nearest_res < atr_stop:
                 stop = round(nearest_res * 1.01, 2)
@@ -384,7 +386,7 @@ class BeginnerFriendlyTABot:
 
             risk_per_share = max(stop - entry, 0.01)
 
-            atr_target = round(entry - (atr * 3), 2)
+            atr_target = round(entry - (effective_atr * 3), 2)
             nearest_sup = max((s for s in supports if s < entry), default=None)
             if nearest_sup is not None and nearest_sup > atr_target and (entry - nearest_sup) >= risk_per_share * 1.5:
                 target = round(nearest_sup * 1.01, 2)
@@ -395,7 +397,7 @@ class BeginnerFriendlyTABot:
             rr = round(reward / risk_per_share, 2)
             suggested_shares = max(int(max_dollar_risk // risk_per_share), 1)
 
-            trade_type = "Downside momentum" if last_vol > avg20_vol * 1.3 else "Weak chart"
+            trade_type = "Downside momentum" if is_day_trade else "Weak chart"
             expected_hold = "Short term move"
             confidence = "Sell" if score <= -4 and rr >= 1.5 else "Neutral"
 
