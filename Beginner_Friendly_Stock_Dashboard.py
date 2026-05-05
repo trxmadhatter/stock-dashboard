@@ -418,6 +418,35 @@ class BeginnerFriendlyTABot:
             strong_candle = close < last_open and (last_open - close) / max(last_open, 0.01) >= 0.005
             vwap_committed = vwap is None or close < vwap * 0.997
         is_day_trade = vol_spike and strong_candle and vwap_committed
+
+        # Build beginner-readable signal reasons (reused in explanation below)
+        signal_reasons: List[str] = []
+        if close > ma50:
+            signal_reasons.append(f"price (${close:.2f}) is above the 50-day average (${ma50:.2f}), so buyers have been in control recently")
+        else:
+            signal_reasons.append(f"price (${close:.2f}) is below the 50-day average (${ma50:.2f}), so sellers have had the upper hand")
+        if ma50 > ma100 > ma200:
+            signal_reasons.append("short, medium, and long-term averages are all stacked in bullish order")
+        elif ma50 < ma100 < ma200:
+            signal_reasons.append("short, medium, and long-term averages are all stacked in bearish order")
+        if 50 <= rsi_value <= 70:
+            signal_reasons.append(f"RSI is {rsi_value:.0f} — in the healthy bullish range (not too hot, momentum is still building)")
+        elif rsi_value > 70:
+            signal_reasons.append(f"RSI is {rsi_value:.0f} — overbought, meaning price may be stretched too far too fast")
+        elif rsi_value < 45:
+            signal_reasons.append(f"RSI is {rsi_value:.0f} — showing weak or fading momentum")
+        if macd_now > signal_now:
+            signal_reasons.append("MACD is above its signal line, a bullish momentum confirmation")
+        else:
+            signal_reasons.append("MACD is below its signal line, meaning momentum is leaning bearish")
+        if last_vol > avg20_vol:
+            vol_pct = int((last_vol / avg20_vol - 1) * 100)
+            signal_reasons.append(f"volume is {vol_pct}% above average — more participants are involved, which adds conviction")
+        if vwap is not None:
+            if close > vwap:
+                signal_reasons.append(f"price is above VWAP (${vwap:.2f}), meaning buyers are winning the intraday battle")
+            else:
+                signal_reasons.append(f"price is below VWAP (${vwap:.2f}), meaning sellers are in control today")
         if is_day_trade and intraday_atr_val is not None:
             effective_atr = intraday_atr_val
         elif is_day_trade:
@@ -458,6 +487,16 @@ class BeginnerFriendlyTABot:
             expected_hold = "Same day to 2 days" if "Day" in trade_type else "2 days to 3 weeks"
             confidence = "Buy" if score >= 4 and rr >= 1.5 else "Neutral"
 
+            reason_text = "; ".join(signal_reasons[:5])
+            explanation = (
+                f"The chart shows {bullish} bullish signals vs {bearish} bearish (score: {score}). "
+                f"Key reasons: {reason_text}. "
+                f"Stop is at ${stop:.2f} — if the stock falls there, the setup is considered broken and you exit. "
+                f"Target is ${target:.2f}. "
+                f"This means you risk ${risk_per_share:.2f} per share to potentially make ${reward:.2f} — "
+                f"a {rr:.1f}:1 reward-to-risk ratio."
+            )
+
             return TradePlan(
                 bias="Buy",
                 entry_price=entry,
@@ -465,7 +504,7 @@ class BeginnerFriendlyTABot:
                 target_1=target,
                 risk_reward=rr,
                 confidence=confidence,
-                explanation="Bullish structure with controlled ATR-based risk.",
+                explanation=explanation,
                 trade_type=trade_type,
                 expected_hold=expected_hold,
                 score=score,
@@ -502,6 +541,15 @@ class BeginnerFriendlyTABot:
             expected_hold = "Short term move"
             confidence = "Sell" if score <= -4 and rr >= 1.5 else "Neutral"
 
+            reason_text = "; ".join(signal_reasons[:5])
+            explanation = (
+                f"The chart shows {bearish} bearish signals vs {bullish} bullish (score: {score}). "
+                f"Key reasons: {reason_text}. "
+                f"This chart is weak — buyers are not in control. New traders should usually avoid buying this. "
+                f"If you were shorting, your stop would be at ${stop:.2f} and target at ${target:.2f} "
+                f"({rr:.1f}:1 reward-to-risk)."
+            )
+
             return TradePlan(
                 bias="Sell / Avoid",
                 entry_price=entry,
@@ -509,7 +557,7 @@ class BeginnerFriendlyTABot:
                 target_1=target,
                 risk_reward=rr,
                 confidence=confidence,
-                explanation="Bearish structure with controlled ATR-based risk.",
+                explanation=explanation,
                 trade_type=trade_type,
                 expected_hold=expected_hold,
                 score=score,
@@ -1375,7 +1423,8 @@ def explain_trade_like_beginner(plan: TradePlan) -> str:
     if plan.entry_price is None:
         return (
             "This is not a trade right now. The chart is too mixed, so the safer move is to wait "
-            "instead of forcing an entry."
+            "instead of forcing an entry. A good trade has multiple signals lining up together — "
+            "right now they are pointing in different directions."
         )
 
     risk_per_share = (
@@ -1385,23 +1434,38 @@ def explain_trade_like_beginner(plan: TradePlan) -> str:
     )
 
     if plan.confidence == "Buy":
+        rr = plan.risk_reward or 0.0
+        score_desc = "strong" if plan.score >= 5 else "decent" if plan.score >= 3 else "borderline"
+        rr_desc = "excellent" if rr >= 3 else "solid" if rr >= 2 else "acceptable"
         return (
-            f"This setup looks bullish, which means the chart is leaning upward. "
-            f"The dashboard thinks buying near ${plan.entry_price:.2f} could make sense. "
-            f"If the price drops to around ${plan.stop_loss:.2f}, get out, because that means the trade is likely wrong. "
-            f"If the move works, the first goal is around ${plan.target_1:.2f}. "
-            f"You are risking about ${risk_per_share:.2f} per share on this idea."
+            f"**Why this looks like a good move:** The chart has a {score_desc} bullish score of {plan.score} — "
+            f"that means most of the signals the tool checks are pointing up at the same time. "
+            f"Think of it like a checklist: the more boxes that are checked, the more confident we are. "
+            f"\n\n"
+            f"**The plan in plain English:** Buy near ${plan.entry_price:.2f}. "
+            f"If it drops to ${plan.stop_loss:.2f}, that means the idea was wrong — exit and protect your money. "
+            f"If it works, the goal is ${plan.target_1:.2f}. "
+            f"\n\n"
+            f"**Why the risk/reward matters:** You are risking ${risk_per_share:.2f} per share to try to make "
+            f"${(plan.target_1 - plan.entry_price):.2f} per share. That is a {rr:.1f}:1 ratio, which is {rr_desc}. "
+            f"Even if you only win half your trades, a {rr:.1f}:1 ratio can still be profitable over time."
         )
 
     if plan.confidence == "Sell":
         return (
-            "This setup looks weak or bearish. That means buyers are not in control right now. "
-            "New traders should usually avoid buying it until the chart improves."
+            "**Why to avoid this right now:** The chart has more bearish signals than bullish ones. "
+            "That means more of the indicators are pointing down — price below key averages, weak momentum, or sellers in control. "
+            "\n\n"
+            "For a new trader, buying a stock with a bearish chart is like swimming against the current. "
+            "It can work, but the odds are not in your favor. "
+            "The better move is to wait until buyers take back control before entering."
         )
 
     return (
-        "This setup is mixed. Some signals are good and some are weak, so the better move is to wait "
-        "for a cleaner opportunity."
+        "**Why to wait:** This setup is mixed. Some signals are pointing up and some are pointing down. "
+        "When signals disagree like this, the trade does not have a clear edge. "
+        "Trading without an edge is essentially gambling. "
+        "Keep this on your watchlist and wait for the signals to line up more clearly."
     )
 
 
@@ -1424,6 +1488,12 @@ def get_top_mover_candidates(source_name: str, count: int) -> List[str]:
             "CRWD", "DDOG", "MDB", "ZS", "ROKU", "COIN", "ABNB", "MELI", "ASML", "TEAM",
             "APP", "NET", "TTD", "RKLB", "IONQ", "HIMS", "HOOD", "SOFI", "RIVN", "NIO",
             "XOM", "CVX", "JPM", "GS", "BAC", "WMT", "COST", "LLY", "UNH", "CAT",
+        ],
+        # Stocks mostly under $30 — good for smaller accounts where buying 1 share at a time is realistic
+        "Budget Picks (Under $30)": [
+            "F", "T", "SOFI", "SNAP", "AAL", "LYFT", "NIO", "XPEV", "VALE",
+            "PINS", "HOOD", "WBA", "MARA", "RIOT", "CCL", "JOBY", "RKLB", "HIMS",
+            "LCID", "GME", "SIRI", "RIVN", "IONQ", "BAC", "PLTR",
         ],
     }
     return source_map.get(source_name, source_map["S&P 500 volume leaders"])[:count]
@@ -2548,6 +2618,11 @@ def main() -> None:
         "**How to use this:** green means worth considering, yellow means watch or wait, "
         "red means avoid or skip. The tool still uses the stricter logic underneath."
     )
+    st.info(
+        "**New to stocks? Start here:** You do not need thousands of dollars. Many stocks trade under $20–$30 per share. "
+        "Try scanning **Budget Picks (Under $30)** in the Top Movers or Options scanner — these are stocks where "
+        "you can buy 1–5 shares at a time and still follow a proper trade plan with a stop-loss and target."
+    )
 
     tracker_trades = refresh_tracker_prices(load_tracker())
     save_tracker(tracker_trades)
@@ -2597,9 +2672,9 @@ def main() -> None:
         minimum_option_grade = st.selectbox("Minimum Option Grade", ["A", "B", "C", "D", "F"], index=1)
         options_scan_source = st.selectbox(
             "Options Fit Scanner Source",
-            ["Watchlist", "Top Movers", "Market Hunter Universe"],
+            ["Watchlist", "Top Movers", "Market Hunter Universe", "Budget Picks (Under $30)"],
             index=2,
-            help="Choose where the account-fit options scanner should look for tickers.",
+            help="Choose where the account-fit options scanner should look for tickers. Budget Picks scans cheaper stocks.",
         )
         max_options_scan_tickers = st.slider(
             "Max Tickers To Options-Scan",
@@ -2637,7 +2712,8 @@ def main() -> None:
         movers_count = st.slider("How Many Top Movers", min_value=5, max_value=50, value=15, step=5)
         movers_source = st.selectbox(
             "Top Mover List",
-            ["S&P 500 volume leaders", "NASDAQ 100 approximate leaders", "Market hunter universe"],
+            ["S&P 500 volume leaders", "NASDAQ 100 approximate leaders", "Market hunter universe", "Budget Picks (Under $30)"],
+            help="Budget Picks shows cheaper stocks (mostly under $30) that are easier to afford as a beginner.",
         )
 
         st.markdown("### Alerts")
@@ -2724,6 +2800,8 @@ def main() -> None:
             raw_tickers = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
         elif options_scan_source == "Top Movers":
             raw_tickers = get_top_mover_candidates(movers_source, max_options_scan_tickers)
+        elif options_scan_source == "Budget Picks (Under $30)":
+            raw_tickers = get_top_mover_candidates("Budget Picks (Under $30)", max_options_scan_tickers)
         else:
             raw_tickers = get_top_mover_candidates("Market hunter universe", max_options_scan_tickers)
 
@@ -2998,32 +3076,59 @@ def main() -> None:
     hero3.metric("Trade Type", trade_plan.trade_type)
     hero4.metric("Expected Hold", trade_plan.expected_hold)
 
+    with st.expander("What do these numbers mean?", expanded=False):
+        st.markdown(
+            "**Confidence (Buy / Sell / Neutral):** Whether the majority of signals point up (Buy), down (Sell), or are mixed (Neutral). "
+            "Only trade in the direction that matches Confidence.\n\n"
+            "**Setup Score:** A count of how many signals fired in the same direction. "
+            "A score of 3–4 is decent. 5+ is strong. 0–2 means wait. Negative scores mean bearish signals dominate.\n\n"
+            "**Trade Type:** Swing trade means holding for days to weeks. Day trade / momentum means the setup looks more like a fast intraday move.\n\n"
+            "**Expected Hold:** A rough estimate of how long you might be in the trade. Not a guarantee — exit at your stop or target whenever they are hit."
+        )
+
     st.markdown("### What This Means In Plain English")
-    st.info(beginner_summary)
+    st.markdown(beginner_summary)
 
     st.markdown("### Why The Dashboard Thinks This")
-    st.write(trade_plan.explanation)
+    st.info(trade_plan.explanation)
 
     st.markdown("### Simple Trade Plan")
     plan1, plan2, plan3, plan4 = st.columns(4)
     plan1.metric("Entry", f"${trade_plan.entry_price:.2f}" if trade_plan.entry_price is not None else "N/A")
-    plan2.metric("Stop", f"${trade_plan.stop_loss:.2f}" if trade_plan.stop_loss is not None else "N/A")
+    plan2.metric("Stop Loss", f"${trade_plan.stop_loss:.2f}" if trade_plan.stop_loss is not None else "N/A")
     plan3.metric("Target", f"${trade_plan.target_1:.2f}" if trade_plan.target_1 is not None else "N/A")
     plan4.metric("Risk/Reward", f"{trade_plan.risk_reward:.2f}" if trade_plan.risk_reward is not None else "N/A")
 
+    with st.expander("What does Entry / Stop / Target / Risk-Reward mean?", expanded=False):
+        st.markdown(
+            "**Entry:** The price where you would buy the stock. You do not have to buy the exact cent — anywhere close works.\n\n"
+            "**Stop Loss:** If the stock falls to this price, exit the trade immediately. "
+            "This is your protection. It limits how much you can lose on one trade. Do not skip it.\n\n"
+            "**Target:** The price you are aiming for. When the stock reaches this, you can sell and take your profit. "
+            "Some traders sell half at the target and let the rest run.\n\n"
+            "**Risk/Reward:** How much you could make compared to how much you are risking. "
+            "A 2.0 means you could make $2 for every $1 you risk. "
+            "Aim for at least 2.0. Anything below 1.5 is usually not worth the trade."
+        )
+
     if trade_plan.suggested_shares is not None and trade_plan.entry_price is not None:
-        st.markdown("### Position Size")
+        st.markdown("### How Many Shares To Buy")
         total_cost = trade_plan.suggested_shares * trade_plan.entry_price
         size1, size2, size3, size4 = st.columns(4)
         size1.metric("Suggested Shares", trade_plan.suggested_shares)
-        size2.metric("Total Position Cost", f"${total_cost:.2f}")
+        size2.metric("Total Cost To Buy", f"${total_cost:.2f}")
         size3.metric(
-            "Max Dollar Risk",
+            "Max You Could Lose",
             f"${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "N/A",
         )
         size4.metric(
             "Risk Per Share",
             f"${trade_plan.risk_per_share:.2f}" if trade_plan.risk_per_share is not None else "N/A",
+        )
+        st.caption(
+            f"This position size is calculated so that if the stock hits your stop loss, you lose at most "
+            f"${trade_plan.dollars_at_risk:.2f}. "
+            "Keeping each trade's loss small (typically 0.5%–1% of your account) is how you stay in the game long enough to learn."
         )
     else:
         st.info("No position size available because there is no active trade setup.")
@@ -3071,7 +3176,11 @@ def main() -> None:
             st.markdown("**Support and Resistance**")
             st.write(f"Support levels: {', '.join(f'${x:.2f}' for x in data['supports'])}")
             st.write(f"Resistance levels: {', '.join(f'${x:.2f}' for x in data['resistances'])}")
-            st.caption("Support is where buyers may step in. Resistance is where sellers may step in.")
+            st.caption(
+                "**Support** is a price level where the stock has bounced upward before — buyers tend to step in near these prices. "
+                "**Resistance** is where the stock has been pushed back down before — sellers tend to appear there. "
+                "Your stop-loss and target are anchored to these levels."
+            )
 
         card = st.container(border=True)
         with card:
@@ -3079,16 +3188,29 @@ def main() -> None:
             st.write(f"50-day MA: ${data['ma50']:.2f}")
             st.write(f"100-day MA: ${data['ma100']:.2f}")
             st.write(f"200-day MA: ${data['ma200']:.2f}")
-            st.caption(bot.crossover_text(data["ma50"], data["ma100"], data["ma200"]))
+            st.caption(
+                bot.crossover_text(data["ma50"], data["ma100"], data["ma200"])
+                + " Moving averages smooth out the noise and show the underlying trend. "
+                "When price is above all three, the stock has been in an uptrend across multiple timeframes."
+            )
             if data.get("vwap") is not None:
                 direction = "above" if data["price"] > data["vwap"] else "below"
                 st.write(f"VWAP (today): ${data['vwap']:.2f} — price is {direction} VWAP")
-                st.caption("VWAP resets each day. Price above VWAP favors buyers intraday.")
+                st.caption(
+                    "VWAP (Volume Weighted Average Price) resets each morning and tracks where most of today's shares traded. "
+                    "Price above VWAP means buyers have controlled the day so far. Below VWAP means sellers are winning today."
+                )
 
         card = st.container(border=True)
         with card:
             st.markdown("**Chart Pattern**")
             st.write(f"Detected pattern: {data['pattern']}")
+            st.caption(
+                "Chart patterns show the shape of price movement over time. "
+                "An uptrend (higher highs, higher lows) means buyers keep pushing price up. "
+                "Triangles and consolidations mean the stock is pausing — a breakout may follow. "
+                "No pattern just means the move does not fit a clear template right now."
+            )
 
     with right:
         card = st.container(border=True)
@@ -3096,9 +3218,18 @@ def main() -> None:
             st.markdown("**Momentum Indicators**")
             st.write(f"RSI (14): {data['rsi']:.2f}")
             st.write(bot.rsi_text(data["rsi"]))
+            st.caption(
+                "RSI (Relative Strength Index) measures how fast the price has been moving. "
+                "30–50 is neutral to soft. 50–70 is the healthy bullish zone (momentum building without being overheated). "
+                "Above 70 = overbought (may pull back soon). Below 30 = oversold (may bounce)."
+            )
             st.write(f"MACD: {data['macd']:.4f}")
             st.write(f"Signal Line: {data['macd_signal']:.4f}")
-            st.caption(bot.macd_text(data["macd"], data["macd_signal"], data["macd_hist"]))
+            st.caption(
+                bot.macd_text(data["macd"], data["macd_signal"], data["macd_hist"])
+                + " MACD compares two moving averages. When MACD crosses above its signal line, short-term momentum "
+                "is outpacing long-term momentum — a bullish sign. When it crosses below, momentum is fading."
+            )
 
         card = st.container(border=True)
         with card:
@@ -3106,12 +3237,22 @@ def main() -> None:
             st.write(f"Upper: ${data['bb_upper']:.2f}")
             st.write(f"Middle: ${data['bb_mid']:.2f}")
             st.write(f"Lower: ${data['bb_lower']:.2f}")
-            st.caption(bot.bollinger_text(data["price"], data["bb_upper"], data["bb_mid"], data["bb_lower"]))
+            st.caption(
+                bot.bollinger_text(data["price"], data["bb_upper"], data["bb_mid"], data["bb_lower"])
+                + " Bollinger Bands are like a channel around the price. "
+                "When price is near the upper band, it has moved far above average — it may be extended. "
+                "Near the lower band means the opposite. Price in the middle means it is normal range."
+            )
 
         card = st.container(border=True)
         with card:
             st.markdown("**Volume Read**")
             st.write(data["volume_text"])
+            st.caption(
+                "Volume is how many shares were traded today. High volume on an up day means buyers are motivated — "
+                "that is a bullish confirmation. High volume on a down day means sellers are in control. "
+                "Low volume moves are less reliable because fewer people are involved."
+            )
 
     st.markdown("### Extra Details")
     detail1, detail2, detail3, detail4 = st.columns(4)
@@ -3123,12 +3264,20 @@ def main() -> None:
     )
     detail4.metric("Expected Hold", trade_plan.expected_hold)
 
-    st.info("Beginner reminder: a good-looking chart can still fail. The stop-loss is there to protect your account, not to punish you.")
+    st.info(
+        "**Beginner reminder:** Even a great-looking chart can fail. No indicator is right 100% of the time. "
+        "The stop-loss is not there to punish you — it is there to limit damage on the trades that do not work. "
+        "Your goal is to keep losses small and let winners run."
+    )
 
     st.markdown("### Simple Rules To Follow")
-    st.write(
-        "Only take trades when the tool says TAKE TRADE, the score is 3 or better for bullish setups, "
-        "and risk/reward is 2.0 or better. If it says WATCH or SKIP, do not force the trade."
+    st.markdown(
+        "- Only enter when the dashboard says **TAKE TRADE** (green box at the top)\n"
+        "- The score should be **3 or higher** for bullish setups\n"
+        "- Risk/reward should be **2.0 or better** — that means the potential gain is at least twice the potential loss\n"
+        "- If it says **WATCH** or **SKIP**, do not force the trade — wait for a better setup\n"
+        "- Always use the stop-loss. If the stock hits your stop, exit. Do not move it lower hoping it comes back.\n"
+        "- Risk no more than 0.5%–1% of your account on any single trade"
     )
 
     st.markdown("### Paper Trade Tracker")
