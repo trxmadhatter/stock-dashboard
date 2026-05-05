@@ -1544,6 +1544,7 @@ def classify_action(row: pd.Series) -> str:
 WATCHLIST_FILE = Path("saved_watchlist.txt")
 TRACKER_FILE = Path("paper_trades.json")
 OPTION_TRACKER_FILE = Path("option_trades.json")
+HOLDINGS_FILE = Path("holdings.json")
 
 
 def load_option_tracker() -> List[dict]:
@@ -1561,6 +1562,18 @@ def load_option_tracker() -> List[dict]:
 
 def save_option_tracker(trades: List[dict]) -> None:
     OPTION_TRACKER_FILE.write_text(json.dumps(trades, indent=2), encoding="utf-8")
+
+
+def load_holdings() -> List[dict]:
+    try:
+        if HOLDINGS_FILE.exists():
+            content = HOLDINGS_FILE.read_text(encoding="utf-8").strip()
+            if content:
+                data = json.loads(content)
+                return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
 
 
 def go_to_option_tracker(message: str = "") -> None:
@@ -2702,12 +2715,19 @@ def main() -> None:
         st.markdown("---")
         run = st.button("Analyze Stock", use_container_width=True, type="primary")
         run_scan = st.button("Scan Watchlist", use_container_width=True)
+        run_buy_scan = st.button("Find Me A Buy", use_container_width=True)
+        run_holdings = st.button("My Holdings", use_container_width=True)
         run_option_tracker = st.button("My Option Trades", use_container_width=True)
 
         if run_option_tracker:
             st.session_state["show_option_tracker"] = True
-        if run or run_scan:
+            st.session_state["show_holdings"] = False
+        if run_holdings:
+            st.session_state["show_holdings"] = True
             st.session_state["show_option_tracker"] = False
+        if run or run_scan or run_buy_scan:
+            st.session_state["show_option_tracker"] = False
+            st.session_state["show_holdings"] = False
 
     option_tracker_trades = refresh_option_tracker_prices(
         load_option_tracker(),
@@ -2718,6 +2738,7 @@ def main() -> None:
     save_option_tracker(option_tracker_trades)
 
     show_option_tracker = bool(st.session_state.get("show_option_tracker", False))
+    show_holdings = bool(st.session_state.get("show_holdings", False))
 
     # Compatibility stubs — these modes were removed from the simplified UI
     run_movers = False
@@ -2730,7 +2751,7 @@ def main() -> None:
     min_score = 2
     show_only_actionable = True
 
-    if not run and not run_scan and not run_option_tracker and not show_option_tracker:
+    if not run and not run_scan and not run_buy_scan and not run_holdings and not run_option_tracker and not show_option_tracker and not show_holdings:
         st.info("Enter a ticker on the left and click **Analyze Stock**, or paste tickers and click **Scan Watchlist**.")
         if option_tracker_trades:
             st.markdown("### Your Open Option Trades")
@@ -2744,6 +2765,161 @@ def main() -> None:
             stop_loss_pct=OPT_STOP_LOSS_PCT,
             force_close_dte=OPT_FORCE_CLOSE_DTE,
         )
+        return
+
+    if run_holdings or show_holdings:
+        holdings = load_holdings()
+        if not holdings:
+            st.error("No holdings found. Make sure holdings.json is in the same folder as the dashboard.")
+            return
+
+        st.markdown("## My Holdings — Dashboard Signals")
+        st.caption(
+            "Each position is scanned with the same analysis as Analyze Stock. "
+            "Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish."
+        )
+
+        rows_h = []
+        failed_h: List[str] = []
+        prog_h = st.progress(0)
+        stat_h = st.empty()
+
+        for idx, holding in enumerate(holdings, start=1):
+            tk = str(holding.get("ticker", "")).upper()
+            avg_cost = float(holding.get("avg_cost", 0) or 0)
+            shares = float(holding.get("shares", 0) or 0)
+            stat_h.write(f"Checking {tk} ({idx}/{len(holdings)})")
+            try:
+                h_bot = BeginnerFriendlyTABot(ticker=tk, position="long", account_size=account_size, risk_pct=risk_pct)
+                h_snap = h_bot.build_snapshot()
+                h_plan: TradePlan = h_snap["trade_plan"]
+                current_price = float(h_snap["price"])
+                pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
+                pnl_dollars = (current_price - avg_cost) * shares
+                action_lbl, action_t, _ = action_label_from_plan(h_plan)
+                if action_t == "success":
+                    signal = "BUY / HOLD"
+                elif action_t == "error":
+                    signal = "SELL / EXIT"
+                else:
+                    signal = "WATCH"
+                rows_h.append({
+                    "Ticker": tk,
+                    "Name": holding.get("name", tk),
+                    "Avg Cost": round(avg_cost, 2),
+                    "Price Now": round(current_price, 2),
+                    "P&L %": round(pnl_pct, 1),
+                    "P&L $": round(pnl_dollars, 2),
+                    "Signal": signal,
+                    "Score": h_plan.score,
+                })
+            except Exception:
+                failed_h.append(tk)
+            prog_h.progress(idx / len(holdings))
+
+        stat_h.empty()
+        prog_h.empty()
+
+        if not rows_h:
+            st.error("Could not load data for any holdings.")
+            return
+
+        holdings_df = pd.DataFrame(rows_h).sort_values("P&L $", ascending=False)
+
+        st.dataframe(
+            holdings_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Avg Cost": st.column_config.NumberColumn("Avg Cost", format="$%.2f"),
+                "Price Now": st.column_config.NumberColumn("Price Now", format="$%.2f"),
+                "P&L %": st.column_config.NumberColumn("P&L %", format="%.1f%%"),
+                "P&L $": st.column_config.NumberColumn("P&L $", format="$%.2f"),
+                "Score": st.column_config.NumberColumn("Score"),
+            },
+        )
+
+        total_pnl = sum(r["P&L $"] for r in rows_h)
+        sell_count = sum(1 for r in rows_h if r["Signal"] == "SELL / EXIT")
+        hold_count = sum(1 for r in rows_h if r["Signal"] == "BUY / HOLD")
+        st.markdown(
+            f"**{hold_count} positions** still look bullish. "
+            f"**{sell_count} positions** have bearish signals — consider reviewing those. "
+            f"Total open P&L across all scanned positions: **${total_pnl:+,.2f}**."
+        )
+
+        if failed_h:
+            st.caption(f"Could not load data for: {', '.join(failed_h)}")
+        return
+
+    if run_buy_scan:
+        hunter = get_top_mover_candidates("Market hunter universe", 60)
+        affordable = get_top_mover_candidates("Affordable Stocks (Mixed Risk)", 25)
+        combined_seen: set = set()
+        combined_tickers: List[str] = []
+        for t in hunter + affordable:
+            if t not in combined_seen:
+                combined_tickers.append(t)
+                combined_seen.add(t)
+
+        st.warning(
+            f"Scanning {len(combined_tickers)} stocks for the best buy setups. "
+            "This takes 3-5 minutes — please do not close this tab."
+        )
+
+        buy_rows = []
+        buy_failed: List[str] = []
+        buy_prog = st.progress(0)
+        buy_stat = st.empty()
+
+        for idx, tk in enumerate(combined_tickers, start=1):
+            buy_stat.write(f"Scanning {tk} ({idx}/{len(combined_tickers)})")
+            try:
+                b_bot = BeginnerFriendlyTABot(ticker=tk, position="watching", account_size=account_size, risk_pct=risk_pct)
+                b_snap = b_bot.build_snapshot()
+                b_plan: TradePlan = b_snap["trade_plan"]
+                rr = b_plan.risk_reward if b_plan.risk_reward is not None else 0.0
+                if b_plan.confidence == "Buy" and b_plan.score >= 3 and rr >= 2.0:
+                    buy_rows.append({
+                        "Ticker": tk,
+                        "Price": round(float(b_snap["price"]), 2),
+                        "Score": b_plan.score,
+                        "Buy Near": round(b_plan.entry_price, 2) if b_plan.entry_price is not None else None,
+                        "Exit If": round(b_plan.stop_loss, 2) if b_plan.stop_loss is not None else None,
+                        "Goal": round(b_plan.target_1, 2) if b_plan.target_1 is not None else None,
+                        "R:R": round(rr, 1),
+                        "Hold": b_plan.expected_hold,
+                    })
+            except Exception:
+                buy_failed.append(tk)
+            buy_prog.progress(idx / len(combined_tickers))
+
+        buy_stat.empty()
+        buy_prog.empty()
+
+        st.markdown("## Find Me A Buy — Top Setups Right Now")
+        if not buy_rows:
+            st.info("No strong buy setups found right now. The market may be mixed — check back later or try Scan Watchlist.")
+        else:
+            buy_df = pd.DataFrame(buy_rows).sort_values("Score", ascending=False).head(10)
+            st.caption(
+                f"Found {len(buy_rows)} TAKE TRADE setups out of {len(combined_tickers)} scanned. "
+                "Showing top 10 by score. Type a ticker from this list into Analyze Stock for the full breakdown."
+            )
+            st.dataframe(
+                buy_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                    "Buy Near": st.column_config.NumberColumn("Buy Near", format="$%.2f"),
+                    "Exit If": st.column_config.NumberColumn("Exit If", format="$%.2f"),
+                    "Goal": st.column_config.NumberColumn("Goal", format="$%.2f"),
+                    "R:R": st.column_config.NumberColumn("R:R", format="%.1f"),
+                },
+            )
+        if buy_failed:
+            st.caption(f"Could not load: {', '.join(buy_failed)}")
         return
 
     if run_scan:
