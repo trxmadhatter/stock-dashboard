@@ -422,9 +422,9 @@ class BeginnerFriendlyTABot:
         # Build beginner-readable signal reasons (reused in explanation below)
         signal_reasons: List[str] = []
         if close > ma50:
-            signal_reasons.append(f"price (${close:.2f}) is above the 50-day average (${ma50:.2f}), so buyers have been in control recently")
+            signal_reasons.append(f"price (${close:.2f}) is above the 50-day average (${ma50:.2f}), suggesting buyers may have had the edge recently")
         else:
-            signal_reasons.append(f"price (${close:.2f}) is below the 50-day average (${ma50:.2f}), so sellers have had the upper hand")
+            signal_reasons.append(f"price (${close:.2f}) is below the 50-day average (${ma50:.2f}), suggesting sellers may have had the edge recently")
         if ma50 > ma100 > ma200:
             signal_reasons.append("short, medium, and long-term averages are all stacked in bullish order")
         elif ma50 < ma100 < ma200:
@@ -441,12 +441,15 @@ class BeginnerFriendlyTABot:
             signal_reasons.append("MACD is below its signal line, meaning momentum is leaning bearish")
         if last_vol > avg20_vol:
             vol_pct = int((last_vol / avg20_vol - 1) * 100)
-            signal_reasons.append(f"volume is {vol_pct}% above average — more participants are involved, which adds conviction")
+            if close > float(df["Close"].iloc[-2]):
+                signal_reasons.append(f"volume is {vol_pct}% above average on an up day — buyers are motivated and participating")
+            else:
+                signal_reasons.append(f"volume is {vol_pct}% above average on a down day — sellers are driving this move with conviction")
         if vwap is not None:
             if close > vwap:
-                signal_reasons.append(f"price is above VWAP (${vwap:.2f}), meaning buyers are winning the intraday battle")
+                signal_reasons.append(f"price is above VWAP (${vwap:.2f}), suggesting buyers may have the intraday edge")
             else:
-                signal_reasons.append(f"price is below VWAP (${vwap:.2f}), meaning sellers are in control today")
+                signal_reasons.append(f"price is below VWAP (${vwap:.2f}), suggesting sellers may have the intraday edge")
         if is_day_trade and intraday_atr_val is not None:
             effective_atr = intraday_atr_val
         elif is_day_trade:
@@ -1438,17 +1441,17 @@ def explain_trade_like_beginner(plan: TradePlan) -> str:
         score_desc = "strong" if plan.score >= 5 else "decent" if plan.score >= 3 else "borderline"
         rr_desc = "excellent" if rr >= 3 else "solid" if rr >= 2 else "acceptable"
         return (
-            f"**Why this looks like a good move:** The chart has a {score_desc} bullish score of {plan.score} — "
-            f"that means most of the signals the tool checks are pointing up at the same time. "
-            f"Think of it like a checklist: the more boxes that are checked, the more confident we are. "
-            f"\n\n"
-            f"**The plan in plain English:** Buy near ${plan.entry_price:.2f}. "
-            f"If it drops to ${plan.stop_loss:.2f}, that means the idea was wrong — exit and protect your money. "
-            f"If it works, the goal is ${plan.target_1:.2f}. "
-            f"\n\n"
-            f"**Why the risk/reward matters:** You are risking ${risk_per_share:.2f} per share to try to make "
+            f"**Why this setup is bullish:** The chart has a {score_desc} bullish score of {plan.score} — "
+            f"that means most of the signals the tool checks are suggesting upward bias at the same time. "
+            f"Think of it like a checklist: the more boxes that are checked, the higher-quality the setup. "
+            f"No signal is a guarantee.\n\n"
+            f"**The plan in plain English:** Consider buying near ${plan.entry_price:.2f}. "
+            f"If it drops to ${plan.stop_loss:.2f}, the setup is no longer valid — exit to protect your money. "
+            f"If it works, the first goal is ${plan.target_1:.2f}.\n\n"
+            f"**Why the risk/reward matters:** You are risking ${risk_per_share:.2f} per share to aim for "
             f"${(plan.target_1 - plan.entry_price):.2f} per share. That is a {rr:.1f}:1 ratio, which is {rr_desc}. "
-            f"Even if you only win half your trades, a {rr:.1f}:1 ratio can still be profitable over time."
+            f"When risk is controlled and reward is larger than risk, a strategy can be profitable over many trades — "
+            f"but only if you actually exit at your stop and target (before fees and slippage)."
         )
 
     if plan.confidence == "Sell":
@@ -1463,9 +1466,8 @@ def explain_trade_like_beginner(plan: TradePlan) -> str:
 
     return (
         "**Why to wait:** This setup is mixed. Some signals are pointing up and some are pointing down. "
-        "When signals disagree like this, the trade does not have a clear edge. "
-        "Trading without an edge is essentially gambling. "
-        "Keep this on your watchlist and wait for the signals to line up more clearly."
+        "When signals disagree like this, the trade does not have a clear edge — it is lower-quality and harder to manage. "
+        "Keep this on your watchlist and wait for the signals to line up more clearly before committing money."
     )
 
 
@@ -1489,11 +1491,12 @@ def get_top_mover_candidates(source_name: str, count: int) -> List[str]:
             "APP", "NET", "TTD", "RKLB", "IONQ", "HIMS", "HOOD", "SOFI", "RIVN", "NIO",
             "XOM", "CVX", "JPM", "GS", "BAC", "WMT", "COST", "LLY", "UNH", "CAT",
         ],
-        # Stocks mostly under $30 — good for smaller accounts where buying 1 share at a time is realistic
-        "Budget Picks (Under $30)": [
+        # Lower-priced stocks for smaller accounts. Note: lower share price does NOT mean lower risk.
+        # Many here are speculative/volatile. Verify prices before trading — lists can go stale.
+        "Affordable Stocks (Mixed Risk)": [
             "F", "T", "SOFI", "SNAP", "AAL", "LYFT", "NIO", "XPEV", "VALE",
-            "PINS", "HOOD", "WBA", "MARA", "RIOT", "CCL", "JOBY", "RKLB", "HIMS",
-            "LCID", "GME", "SIRI", "RIVN", "IONQ", "BAC", "PLTR",
+            "PINS", "MARA", "RIOT", "CCL", "JOBY", "HIMS", "LCID", "GME",
+            "SIRI", "RIVN", "PARA", "CLSK", "SOUN", "OPEN", "PLUG", "AMC",
         ],
     }
     return source_map.get(source_name, source_map["S&P 500 volume leaders"])[:count]
@@ -2620,8 +2623,9 @@ def main() -> None:
     )
     st.info(
         "**New to stocks? Start here:** You do not need thousands of dollars. Many stocks trade under $20–$30 per share. "
-        "Try scanning **Budget Picks (Under $30)** in the Top Movers or Options scanner — these are stocks where "
-        "you can buy 1–5 shares at a time and still follow a proper trade plan with a stop-loss and target."
+        "Try scanning **Affordable Stocks (Mixed Risk)** in the Ticker Source or Options scanner — these are stocks where "
+        "you can buy 1–5 shares at a time and still follow a proper trade plan with a stop-loss and target. "
+        "**Warning:** a lower share price does NOT mean lower risk — many cheaper stocks are highly volatile."
     )
 
     tracker_trades = refresh_tracker_prices(load_tracker())
@@ -2672,7 +2676,7 @@ def main() -> None:
         minimum_option_grade = st.selectbox("Minimum Option Grade", ["A", "B", "C", "D", "F"], index=1)
         options_scan_source = st.selectbox(
             "Options Fit Scanner Source",
-            ["Watchlist", "Top Movers", "Market Hunter Universe", "Budget Picks (Under $30)"],
+            ["Watchlist", "Top Movers", "Market Hunter Universe", "Affordable Stocks (Mixed Risk)"],
             index=2,
             help="Choose where the account-fit options scanner should look for tickers. Budget Picks scans cheaper stocks.",
         )
@@ -2711,9 +2715,9 @@ def main() -> None:
         st.markdown("### Top Movers")
         movers_count = st.slider("How Many Top Movers", min_value=5, max_value=50, value=15, step=5)
         movers_source = st.selectbox(
-            "Top Mover List",
-            ["S&P 500 volume leaders", "NASDAQ 100 approximate leaders", "Market hunter universe", "Budget Picks (Under $30)"],
-            help="Budget Picks shows cheaper stocks (mostly under $30) that are easier to afford as a beginner.",
+            "Ticker Source",
+            ["S&P 500 volume leaders", "NASDAQ 100 approximate leaders", "Market hunter universe", "Affordable Stocks (Mixed Risk)"],
+            help="Affordable Stocks shows lower-priced shares you can buy with a small account. Warning: lower price does NOT mean lower risk.",
         )
 
         st.markdown("### Alerts")
@@ -2800,8 +2804,8 @@ def main() -> None:
             raw_tickers = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
         elif options_scan_source == "Top Movers":
             raw_tickers = get_top_mover_candidates(movers_source, max_options_scan_tickers)
-        elif options_scan_source == "Budget Picks (Under $30)":
-            raw_tickers = get_top_mover_candidates("Budget Picks (Under $30)", max_options_scan_tickers)
+        elif options_scan_source == "Affordable Stocks (Mixed Risk)":
+            raw_tickers = get_top_mover_candidates("Affordable Stocks (Mixed Risk)", max_options_scan_tickers)
         else:
             raw_tickers = get_top_mover_candidates("Market hunter universe", max_options_scan_tickers)
 
@@ -3125,9 +3129,10 @@ def main() -> None:
             "Risk Per Share",
             f"${trade_plan.risk_per_share:.2f}" if trade_plan.risk_per_share is not None else "N/A",
         )
+        risk_display = f"${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "your risk limit"
         st.caption(
             f"This position size is calculated so that if the stock hits your stop loss, you lose at most "
-            f"${trade_plan.dollars_at_risk:.2f}. "
+            f"{risk_display}. "
             "Keeping each trade's loss small (typically 0.5%–1% of your account) is how you stay in the game long enough to learn."
         )
     else:
