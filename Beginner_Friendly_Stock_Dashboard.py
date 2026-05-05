@@ -96,6 +96,48 @@ class BeginnerFriendlyTABot:
         self.data_weekly = self._resample_ohlcv(daily, "W")
         self.data_monthly = self._resample_ohlcv(daily, "ME")
 
+    def load_intraday_data(self) -> Optional[pd.DataFrame]:
+        try:
+            intraday = yf.download(self.ticker, period="2d", interval="30m", auto_adjust=False, progress=False)
+            if intraday.empty:
+                return None
+            if isinstance(intraday.columns, pd.MultiIndex):
+                intraday.columns = intraday.columns.get_level_values(0)
+            return intraday.dropna()
+        except Exception:
+            return None
+
+    @staticmethod
+    def compute_vwap(df: pd.DataFrame) -> Optional[float]:
+        if df is None or df.empty:
+            return None
+        try:
+            latest_date = df.index.date[-1]
+            today_bars = df[[d == latest_date for d in df.index.date]]
+            if today_bars.empty:
+                return None
+            typical = (today_bars["High"] + today_bars["Low"] + today_bars["Close"]) / 3
+            vwap = (typical * today_bars["Volume"]).cumsum() / today_bars["Volume"].cumsum()
+            return round(float(vwap.iloc[-1]), 2)
+        except Exception:
+            return None
+
+    @staticmethod
+    def intraday_atr_from_bars(df: pd.DataFrame) -> Optional[float]:
+        if df is None or len(df) < 3:
+            return None
+        try:
+            high = df["High"]
+            low = df["Low"]
+            prev_close = df["Close"].shift()
+            tr = pd.concat(
+                [(high - low), (high - prev_close).abs(), (low - prev_close).abs()],
+                axis=1,
+            ).max(axis=1)
+            return float(tr.rolling(14, min_periods=3).mean().iloc[-1])
+        except Exception:
+            return None
+
     @staticmethod
     def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         out = pd.DataFrame()
@@ -290,7 +332,12 @@ class BeginnerFriendlyTABot:
         return "No confirmed pattern — mixed or choppy price action"
 
     def create_trade_plan(
-        self, df: pd.DataFrame, supports: List[float], resistances: List[float]
+        self,
+        df: pd.DataFrame,
+        supports: List[float],
+        resistances: List[float],
+        intraday_atr_val: Optional[float] = None,
+        vwap: Optional[float] = None,
     ) -> TradePlan:
         close = float(df["Close"].iloc[-1])
 
@@ -341,6 +388,12 @@ class BeginnerFriendlyTABot:
             else:
                 bearish += 1
 
+        if vwap is not None:
+            if close > vwap:
+                bullish += 1
+            else:
+                bearish += 1
+
         score = bullish - bearish
 
         high = df["High"]
@@ -357,7 +410,12 @@ class BeginnerFriendlyTABot:
 
         atr = float(tr.rolling(14).mean().iloc[-1])
         is_day_trade = last_vol > avg20_vol * 1.3
-        effective_atr = atr * 0.5 if is_day_trade else atr
+        if is_day_trade and intraday_atr_val is not None:
+            effective_atr = intraday_atr_val
+        elif is_day_trade:
+            effective_atr = atr * 0.5
+        else:
+            effective_atr = atr
         entry = round(close, 2)
 
         account_size = self.account_size
@@ -530,7 +588,10 @@ class BeginnerFriendlyTABot:
         supports, resistances = self.support_resistance(df)
         fib = self.fibonacci_levels(df)
         pattern = self.detect_chart_pattern(df)
-        trade_plan = self.create_trade_plan(df, supports, resistances)
+        intraday_df = self.load_intraday_data()
+        intraday_atr_val = self.intraday_atr_from_bars(intraday_df)
+        vwap = self.compute_vwap(intraday_df)
+        trade_plan = self.create_trade_plan(df, supports, resistances, intraday_atr_val=intraday_atr_val, vwap=vwap)
 
         out = df.copy()
         out["MA50"] = self.sma(out["Close"], 50)
@@ -560,6 +621,7 @@ class BeginnerFriendlyTABot:
             "volume_text": self.volume_analysis(df),
             "pattern": pattern,
             "fib": fib,
+            "vwap": vwap,
             "trade_plan": trade_plan,
             "chart_df": out.tail(180),
         }
@@ -3010,6 +3072,10 @@ def main() -> None:
             st.write(f"100-day MA: ${data['ma100']:.2f}")
             st.write(f"200-day MA: ${data['ma200']:.2f}")
             st.caption(bot.crossover_text(data["ma50"], data["ma100"], data["ma200"]))
+            if data.get("vwap") is not None:
+                direction = "above" if data["price"] > data["vwap"] else "below"
+                st.write(f"VWAP (today): ${data['vwap']:.2f} — price is {direction} VWAP")
+                st.caption("VWAP resets each day. Price above VWAP favors buyers intraday.")
 
         card = st.container(border=True)
         with card:
