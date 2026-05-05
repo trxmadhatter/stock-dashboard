@@ -2821,98 +2821,161 @@ def main() -> None:
 
         st.markdown("## My Holdings — Dashboard Signals")
 
-        # ── Editable holdings list ───────────────────────────────────────────
-        with st.expander("Edit Holdings — add new stocks or remove ones you sold", expanded=False):
-            st.caption(
-                "Change shares or avg cost, add a new row at the bottom, or delete rows for stocks you sold. "
-                "Click **Save Holdings** when done — the page will rescan with your updated list."
-            )
-            edit_df = pd.DataFrame([{
-                "Ticker": h.get("ticker", ""),
-                "Name": h.get("name", h.get("ticker", "")),
-                "Shares": round(float(h.get("shares", 0) or 0), 6),
-                "Avg Cost": round(float(h.get("avg_cost", 0) or 0), 2),
-            } for h in holdings])
+        # ── Action buttons ───────────────────────────────────────────────────
+        hb1, hb2 = st.columns(2)
+        if hb1.button("+ Add New Stock", use_container_width=True, type="primary", key="btn_add_holding"):
+            current_form = st.session_state.get("holdings_form")
+            st.session_state["holdings_form"] = None if current_form == "add" else "add"
+        if hb2.button("Mark as Sold", use_container_width=True, key="btn_sell_holding"):
+            current_form = st.session_state.get("holdings_form")
+            st.session_state["holdings_form"] = None if current_form == "sell" else "sell"
 
-            edited = st.data_editor(
-                edit_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                height=400,
-                column_config={
-                    "Ticker": st.column_config.TextColumn("Ticker", help="Stock symbol, e.g. AAPL"),
-                    "Name": st.column_config.TextColumn("Name", help="Optional company name"),
-                    "Shares": st.column_config.NumberColumn("Shares", format="%.4f", min_value=0.0),
-                    "Avg Cost": st.column_config.NumberColumn("Avg Cost ($)", format="$%.2f", min_value=0.0),
-                },
-                hide_index=True,
-            )
+        holdings_form = st.session_state.get("holdings_form")
 
-            if st.button("Save Holdings", type="primary", key="save_holdings_btn"):
-                new_holdings = []
-                for _, row in edited.iterrows():
-                    ticker = str(row.get("Ticker", "")).upper().strip()
-                    if ticker:
-                        new_holdings.append({
-                            "ticker": ticker,
-                            "name": str(row.get("Name", ticker)),
-                            "shares": float(row.get("Shares") or 0),
-                            "avg_cost": float(row.get("Avg Cost") or 0),
-                        })
+        # ── Add New Stock form ───────────────────────────────────────────────
+        if holdings_form == "add":
+            existing_tickers = {h["ticker"]: h for h in holdings}
+            with st.form("add_holding_form", border=True):
+                st.markdown("**Add a Stock You Bought**")
+                fa1, fa2 = st.columns(2)
+                new_ticker = fa1.text_input("Ticker Symbol", placeholder="e.g. AAPL").upper().strip()
+                new_name = fa2.text_input("Company Name", placeholder="e.g. Apple  (optional)")
+                fb1, fb2 = st.columns(2)
+                # Pre-fill shares/cost if ticker already in holdings
+                existing = existing_tickers.get(new_ticker, {})
+                new_shares = fb1.number_input(
+                    "Shares", min_value=0.0001, max_value=1_000_000.0,
+                    value=float(existing.get("shares", 1.0)), step=0.0001, format="%.4f",
+                )
+                new_avg_cost = fb2.number_input(
+                    "Avg Cost Per Share ($)", min_value=0.01, max_value=100_000.0,
+                    value=float(existing.get("avg_cost", 1.0)), step=0.01,
+                )
+                fc1, fc2 = st.columns(2)
+                add_ok = fc1.form_submit_button("Save to Holdings", type="primary", use_container_width=True)
+                add_cancel = fc2.form_submit_button("Cancel", use_container_width=True)
+
+            if add_ok and new_ticker:
+                updated = [h for h in load_holdings() if h["ticker"] != new_ticker]
+                updated.append({
+                    "ticker": new_ticker,
+                    "name": new_name or existing.get("name", new_ticker),
+                    "shares": float(new_shares),
+                    "avg_cost": float(new_avg_cost),
+                })
                 try:
-                    HOLDINGS_FILE.write_text(json.dumps(new_holdings, indent=2), encoding="utf-8")
-                    st.success(f"Saved {len(new_holdings)} positions. Rescanning now...")
+                    HOLDINGS_FILE.write_text(json.dumps(updated, indent=2), encoding="utf-8")
+                    action_word = "Updated" if new_ticker in existing_tickers else "Added"
+                    st.session_state["holdings_form"] = None
+                    st.session_state["holdings_rescan"] = True
+                    st.success(f"{action_word} {new_ticker}. Rescanning...")
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Could not save: {exc}")
+            elif add_cancel:
+                st.session_state["holdings_form"] = None
+                st.rerun()
 
-        # ── Signal scan ──────────────────────────────────────────────────────
+        # ── Mark as Sold form ────────────────────────────────────────────────
+        elif holdings_form == "sell":
+            ticker_options = [h["ticker"] for h in holdings]
+            if not ticker_options:
+                st.info("No holdings to sell yet.")
+            else:
+                with st.form("sell_holding_form", border=True):
+                    st.markdown("**Mark a Position as Sold**")
+                    sell_ticker = st.selectbox("Which stock did you sell?", options=ticker_options)
+                    sold_holding = next((h for h in holdings if h["ticker"] == sell_ticker), None)
+                    avg_c = float(sold_holding.get("avg_cost", 0)) if sold_holding else 0.0
+                    shrs = float(sold_holding.get("shares", 0)) if sold_holding else 0.0
+                    sell_price = st.number_input(
+                        "Your Sell Price Per Share ($)", min_value=0.01, max_value=100_000.0,
+                        value=max(avg_c, 0.01), step=0.01,
+                    )
+                    if sold_holding:
+                        realized = (sell_price - avg_c) * shrs
+                        color = "green" if realized >= 0 else "red"
+                        st.markdown(
+                            f"{shrs:.4f} shares @ avg **${avg_c:.2f}** sold at **${sell_price:.2f}** — "
+                            f"Realized P&L: <span style='color:{color}'>**${realized:+,.2f}**</span>",
+                            unsafe_allow_html=True,
+                        )
+                    sc1, sc2 = st.columns(2)
+                    sell_ok = sc1.form_submit_button("Confirm Sale — Remove Position", type="primary", use_container_width=True)
+                    sell_cancel = sc2.form_submit_button("Cancel", use_container_width=True)
+
+                if sell_ok and sold_holding:
+                    realized = (sell_price - avg_c) * shrs
+                    updated = [h for h in load_holdings() if h["ticker"] != sell_ticker]
+                    try:
+                        HOLDINGS_FILE.write_text(json.dumps(updated, indent=2), encoding="utf-8")
+                        st.session_state["holdings_form"] = None
+                        st.session_state["holdings_rescan"] = True
+                        st.success(f"Removed {sell_ticker}. Realized P&L: ${realized:+,.2f}")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not save: {exc}")
+                elif sell_cancel:
+                    st.session_state["holdings_form"] = None
+                    st.rerun()
+
+        # ── Signal scan (cached) ─────────────────────────────────────────────
         if not holdings:
-            st.info("No holdings found — add some using the editor above.")
+            st.info("No holdings yet. Click **+ Add New Stock** to get started.")
             return
 
-        st.caption("Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish.")
+        needs_rescan = st.session_state.get("holdings_rescan", False)
+        scan_cache = st.session_state.get("holdings_scan_cache")
 
-        rows_h = []
-        failed_h: List[str] = []
-        prog_h = st.progress(0)
-        stat_h = st.empty()
+        if scan_cache is None or needs_rescan:
+            st.caption("Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish.")
+            rows_h: List[dict] = []
+            failed_h: List[str] = []
+            prog_h = st.progress(0)
+            stat_h = st.empty()
 
-        for idx, holding in enumerate(holdings, start=1):
-            tk = str(holding.get("ticker", "")).upper()
-            avg_cost = float(holding.get("avg_cost", 0) or 0)
-            shares = float(holding.get("shares", 0) or 0)
-            stat_h.write(f"Checking {tk} ({idx}/{len(holdings)})")
-            try:
-                h_bot = BeginnerFriendlyTABot(ticker=tk, position="long", account_size=account_size, risk_pct=risk_pct)
-                h_snap = h_bot.build_snapshot()
-                h_plan: TradePlan = h_snap["trade_plan"]
-                current_price = float(h_snap["price"])
-                pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
-                pnl_dollars = (current_price - avg_cost) * shares
-                action_lbl, action_t, _ = action_label_from_plan(h_plan)
-                if action_t == "success":
-                    signal = "BUY / HOLD"
-                elif action_t == "error":
-                    signal = "SELL / EXIT"
-                else:
-                    signal = "WATCH"
-                rows_h.append({
-                    "Ticker": tk,
-                    "Name": holding.get("name", tk),
-                    "Avg Cost": round(avg_cost, 2),
-                    "Price Now": round(current_price, 2),
-                    "P&L %": round(pnl_pct, 1),
-                    "P&L $": round(pnl_dollars, 2),
-                    "Signal": signal,
-                    "Score": h_plan.score,
-                })
-            except Exception:
-                failed_h.append(tk)
-            prog_h.progress(idx / len(holdings))
+            for idx, holding in enumerate(holdings, start=1):
+                tk = str(holding.get("ticker", "")).upper()
+                avg_cost = float(holding.get("avg_cost", 0) or 0)
+                shares = float(holding.get("shares", 0) or 0)
+                stat_h.write(f"Checking {tk} ({idx}/{len(holdings)})")
+                try:
+                    h_bot = BeginnerFriendlyTABot(ticker=tk, position="long", account_size=account_size, risk_pct=risk_pct)
+                    h_snap = h_bot.build_snapshot()
+                    h_plan: TradePlan = h_snap["trade_plan"]
+                    current_price = float(h_snap["price"])
+                    pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
+                    pnl_dollars = (current_price - avg_cost) * shares
+                    _, action_t, _ = action_label_from_plan(h_plan)
+                    if action_t == "success":
+                        signal = "BUY / HOLD"
+                    elif action_t == "error":
+                        signal = "SELL / EXIT"
+                    else:
+                        signal = "WATCH"
+                    rows_h.append({
+                        "Ticker": tk,
+                        "Name": holding.get("name", tk),
+                        "Avg Cost": round(avg_cost, 2),
+                        "Price Now": round(current_price, 2),
+                        "P&L %": round(pnl_pct, 1),
+                        "P&L $": round(pnl_dollars, 2),
+                        "Signal": signal,
+                        "Score": h_plan.score,
+                    })
+                except Exception:
+                    failed_h.append(tk)
+                prog_h.progress(idx / len(holdings))
 
-        stat_h.empty()
-        prog_h.empty()
+            stat_h.empty()
+            prog_h.empty()
+            st.session_state["holdings_scan_cache"] = rows_h
+            st.session_state["holdings_rescan"] = False
+            if failed_h:
+                st.caption(f"Could not load: {', '.join(failed_h)}")
+        else:
+            rows_h = scan_cache
+            st.caption("Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish.")
 
         if not rows_h:
             st.error("Could not load data for any holdings.")
@@ -2942,9 +3005,6 @@ def main() -> None:
             f"**{sell_count} positions** have bearish signals — consider reviewing those. "
             f"Total open P&L across all scanned positions: **${total_pnl:+,.2f}**."
         )
-
-        if failed_h:
-            st.caption(f"Could not load data for: {', '.join(failed_h)}")
         return
 
     if run_buy_scan:
