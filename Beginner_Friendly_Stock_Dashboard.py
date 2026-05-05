@@ -2576,393 +2576,200 @@ def render_scan_results(
         st.info(f"Skipped tickers with data issues: {', '.join(failed)}")
 
 
+def _render_mini_stock_tracker(trades: List[dict]) -> None:
+    df = pd.DataFrame(trades)
+    cols = [c for c in ["ticker", "status", "entry", "current_price", "pnl_pct", "stop", "target"] if c in df.columns]
+    st.dataframe(
+        df[cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ticker": st.column_config.TextColumn("Ticker"),
+            "status": st.column_config.TextColumn("Status"),
+            "entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
+            "current_price": st.column_config.NumberColumn("Now", format="$%.2f"),
+            "pnl_pct": st.column_config.NumberColumn("P&L %", format="%.1f%%"),
+            "stop": st.column_config.NumberColumn("Exit If", format="$%.2f"),
+            "target": st.column_config.NumberColumn("Goal", format="$%.2f"),
+        },
+    )
+
+
+def _render_mini_option_tracker(trades: List[dict]) -> None:
+    df = pd.DataFrame(trades)
+    cols = [c for c in ["ticker", "option_type", "strike", "expiration", "dte", "pnl_pct", "exit_recommendation"] if c in df.columns]
+    st.dataframe(
+        df[cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ticker": st.column_config.TextColumn("Ticker"),
+            "option_type": st.column_config.TextColumn("Type"),
+            "strike": st.column_config.NumberColumn("Strike", format="$%.2f"),
+            "expiration": st.column_config.TextColumn("Expires"),
+            "dte": st.column_config.NumberColumn("Days Left"),
+            "pnl_pct": st.column_config.NumberColumn("P&L %", format="%.1f%%"),
+            "exit_recommendation": st.column_config.TextColumn("Recommendation"),
+        },
+    )
+
+
+def _track_option_from_row(row: "pd.Series", ticker: str, plan: TradePlan) -> None:
+    from datetime import timezone
+    trade = {
+        "id": f"OPT_{ticker}_{row['Type']}_{row['Expiration']}_{row['Strike']:.2f}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+        "ticker": ticker,
+        "option_type": str(row["Type"]),
+        "expiration": str(row["Expiration"]),
+        "strike": float(row["Strike"]),
+        "contract_symbol": str(row["Contract"]),
+        "entry_contract_cost": float(row["Premium/Contract"]),
+        "entry_option_price": round(float(row["Premium/Contract"]) / 100, 4),
+        "contracts": int(row["Suggested Contracts"]),
+        "entry_total_cost": float(row["Premium/Contract"]) * int(row["Suggested Contracts"]),
+        "stock_entry": plan.entry_price,
+        "stock_stop": plan.stop_loss,
+        "stock_target": plan.target_1,
+        "stock_bias": plan.bias,
+        "stock_score": plan.score,
+        "source": "simple_dashboard",
+        "status": "OPEN",
+        "added_at_utc": datetime.utcnow().isoformat(),
+    }
+    existing = load_option_tracker()
+    existing.append(trade)
+    save_option_tracker(existing)
+
+
 def main() -> None:
-    st.set_page_config(page_title="Beginner Stock TA Dashboard", layout="wide")
+    st.set_page_config(page_title="Beginner Stock Dashboard", layout="wide")
 
     st.markdown(
         """
         <style>
-        .block-container {
-            padding-top: 2rem;
-            padding-bottom: 3rem;
-            max-width: 1400px;
-        }
-        [data-testid="stSidebar"] {
-            border-right: 1px solid rgba(255,255,255,0.08);
-        }
+        .block-container { padding-top: 1.5rem; padding-bottom: 3rem; max-width: 1100px; }
+        [data-testid="stSidebar"] { border-right: 1px solid rgba(255,255,255,0.08); }
         [data-testid="stMetric"] {
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.06);
-            padding: 14px 16px;
-            border-radius: 14px;
+            padding: 14px 16px; border-radius: 14px;
         }
-        [data-testid="stDataFrame"] {
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 14px;
-            overflow: hidden;
-        }
-        div[data-testid="stAlert"] {
-            border-radius: 14px;
-        }
-        h1, h2, h3 {
-            letter-spacing: -0.02em;
-        }
-        p, li {
-            font-size: 0.98rem;
-        }
+        [data-testid="stDataFrame"] { border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; overflow: hidden; }
+        div[data-testid="stAlert"] { border-radius: 14px; }
+        h1, h2, h3 { letter-spacing: -0.02em; }
+        p, li { font-size: 0.98rem; }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.title("Beginner-Friendly Stock Technical Analysis Dashboard + Options Tracker")
-    st.caption("Made to be readable for newer traders. Educational use only.")
-    st.markdown(
-        "**How to use this:** green means worth considering, yellow means watch or wait, "
-        "red means avoid or skip. The tool still uses the stricter logic underneath."
-    )
-    st.info(
-        "**New to stocks? Start here:** You do not need thousands of dollars. Many stocks trade under $20–$30 per share. "
-        "Try scanning **Affordable Stocks (Mixed Risk)** in the Ticker Source or Options scanner — these are stocks where "
-        "you can buy 1–5 shares at a time and still follow a proper trade plan with a stop-loss and target. "
-        "**Warning:** a lower share price does NOT mean lower risk — many cheaper stocks are highly volatile."
-    )
+    st.title("Stock Dashboard")
+    st.caption("Type a ticker, click Analyze. Green = consider buying. Yellow = wait. Red = avoid. Educational use only.")
 
     tracker_trades = refresh_tracker_prices(load_tracker())
     save_tracker(tracker_trades)
 
+    # Hardcoded option defaults — no need to expose these to beginners
+    OPT_MIN_DAYS = 7
+    OPT_MAX_DAYS = 45
+    OPT_MIN_VOL = 100
+    OPT_MIN_OI = 250
+    OPT_MAX_SPREAD = 0.20
+    OPT_MAX_IV = 1.20
+    OPT_MAX_CONTRACTS = 2
+    OPT_MAX_BREAKEVEN_PCT = 15.0
+    OPT_PROFIT_TARGET_PCT = 50.0
+    OPT_STOP_LOSS_PCT = 50.0
+    OPT_FORCE_CLOSE_DTE = 2
+
     with st.sidebar:
-        st.title("Dashboard Controls")
+        st.markdown("### What to analyze")
+        ticker = st.text_input("Ticker Symbol", value="AAPL", help="Type any US stock ticker, e.g. AAPL, TSLA, F").upper().strip()
 
-        st.markdown("### Single Stock")
-        ticker = st.text_input("Ticker Symbol", value="AAPL").upper().strip()
-        position = st.text_input("Current Position", value="watching")
-
-        st.markdown("### Risk Settings")
+        st.markdown("### Your account")
         account_size = st.number_input(
-            "Account Size ($)",
-            min_value=100.0,
-            max_value=1_000_000.0,
-            value=5_000.0,
-            step=100.0,
-            help="Used for stock position sizing and options max-risk calculations.",
+            "Account Size ($)", min_value=100.0, max_value=1_000_000.0, value=5_000.0, step=100.0,
+            help="How much money is in your trading account.",
         )
         risk_pct_display = st.number_input(
-            "Risk Per Trade (%)",
-            min_value=0.1,
-            max_value=5.0,
-            value=0.5,
-            step=0.1,
-            help="0.5% on a $5,000 account equals $25 risk.",
+            "Risk Per Trade (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1,
+            help="How much of your account you are willing to lose on one trade. 0.5% on $5,000 = $25.",
         )
         risk_pct = risk_pct_display / 100.0
-
-        st.markdown("### Options Mode")
-        enable_options_mode = st.checkbox("Show Options Analysis", value=True)
-        options_min_days = st.slider("Minimum Days To Expiration", min_value=1, max_value=120, value=7)
-        options_max_days = st.slider("Maximum Days To Expiration", min_value=7, max_value=180, value=45)
-        min_option_volume = st.number_input("Minimum Option Volume", min_value=0, max_value=100000, value=100, step=25)
-        min_open_interest = st.number_input("Minimum Open Interest", min_value=0, max_value=100000, value=250, step=50)
-        max_spread_pct_display = st.number_input("Max Bid/Ask Spread (%)", min_value=1.0, max_value=100.0, value=20.0, step=1.0)
-        max_iv_display = st.number_input("Max Implied Volatility (%)", min_value=1.0, max_value=300.0, value=120.0, step=5.0)
-        max_option_premium = st.number_input("Max Premium Per Contract ($)", min_value=1.0, max_value=10000.0, value=250.0, step=25.0)
-        max_breakeven_move_pct = st.number_input("Max Breakeven Move Required (%)", min_value=1.0, max_value=50.0, value=15.0, step=1.0, help="Contracts requiring a larger stock move to break even will be flagged as too far OTM.")
-        max_option_contracts = st.number_input("Max Contracts", min_value=1, max_value=100, value=2, step=1)
-        only_options_that_fit_account = st.checkbox(
-            "Only Show Options That Fit My Account",
-            value=True,
-            help="Keeps only contracts where your risk setting allows at least 1 contract and the stock target clears breakeven.",
-        )
-        minimum_option_grade = st.selectbox("Minimum Option Grade", ["A", "B", "C", "D", "F"], index=1)
-        options_scan_source = st.selectbox(
-            "Options Fit Scanner Source",
-            ["Watchlist", "Top Movers", "Market Hunter Universe", "Affordable Stocks (Mixed Risk)"],
-            index=2,
-            help="Choose where the account-fit options scanner should look for tickers. Budget Picks scans cheaper stocks.",
-        )
-        max_options_scan_tickers = st.slider(
-            "Max Tickers To Options-Scan",
-            min_value=5,
-            max_value=50,
-            value=15,
-            step=5,
-            help="Options chains can be slow. Start with 10 to 15 tickers, then increase if it runs well.",
-        )
-        max_spread_pct = max_spread_pct_display / 100.0
-        max_iv = max_iv_display / 100.0
+        opt_max_premium = min(account_size * risk_pct * 4, 500.0)
 
         st.markdown("### Watchlist")
         default_watchlist = load_saved_watchlist("AAPL, MSFT, NVDA, AMZN, TSLA")
-        watchlist_text = st.text_area(
-            "Watchlist Tickers",
-            value=default_watchlist,
-            help="Enter multiple tickers separated by commas.",
-            height=110,
-        )
-
+        watchlist_text = st.text_area("Tickers (comma separated)", value=default_watchlist, height=90)
         if st.button("Save Watchlist", use_container_width=True):
             try:
                 save_watchlist(watchlist_text)
-                st.success("Watchlist saved.")
+                st.success("Saved.")
             except Exception as exc:
-                st.error(f"Could not save watchlist: {exc}")
+                st.error(f"Could not save: {exc}")
 
-        st.markdown("### Scan Filters")
-        min_rr = st.number_input("Minimum Risk/Reward", min_value=1.0, max_value=5.0, value=2.0, step=0.25)
-        min_score = st.number_input("Minimum Setup Score", min_value=-10, max_value=10, value=2, step=1)
-        show_only_actionable = st.checkbox("Only Show Actionable Setups", value=True)
-
-        st.markdown("### Top Movers")
-        movers_count = st.slider("How Many Top Movers", min_value=5, max_value=50, value=15, step=5)
-        movers_source = st.selectbox(
-            "Ticker Source",
-            ["S&P 500 volume leaders", "NASDAQ 100 approximate leaders", "Market hunter universe", "Affordable Stocks (Mixed Risk)"],
-            help="Affordable Stocks shows lower-priced shares you can buy with a small account. Warning: lower price does NOT mean lower risk.",
-        )
-
-        st.markdown("### Alerts")
-        enable_alerts = st.checkbox("Enable Alerts", value=True)
-        alert_confidence = st.selectbox("Minimum Alert Confidence", ["Buy", "Sell", "Buy or Sell"], index=2)
-        alert_trade_type = st.selectbox(
-            "Preferred Alert Trade Type",
-            ["Any", "Day trade / momentum", "Swing trade"],
-            index=0,
-        )
-
-        st.markdown("### Option Exit Rules")
-        option_profit_target_pct = st.number_input(
-            "Take Profit At Option Gain (%)",
-            min_value=5.0,
-            max_value=500.0,
-            value=50.0,
-            step=5.0,
-            help="Example: 50 means the tracker recommends taking profit when the option is up about 50%.",
-        )
-        option_stop_loss_pct = st.number_input(
-            "Cut Loss At Option Loss (%)",
-            min_value=5.0,
-            max_value=100.0,
-            value=50.0,
-            step=5.0,
-            help="Example: 50 means the tracker recommends cutting the trade if the option loses about half its value.",
-        )
-        option_force_close_dte = st.number_input(
-            "Force Close Warning At DTE <=",
-            min_value=0,
-            max_value=30,
-            value=2,
-            step=1,
-            help="When expiration is this close, the tracker recommends selling to close because time decay/assignment risk gets ugly.",
-        )
-
-        st.markdown("### Actions")
-        run = st.button("Analyze Stock", use_container_width=True)
+        st.markdown("---")
+        run = st.button("Analyze Stock", use_container_width=True, type="primary")
         run_scan = st.button("Scan Watchlist", use_container_width=True)
-        run_movers = st.button("Scan Top Movers", use_container_width=True)
-        run_hunter = st.button("Market Hunter Mode", use_container_width=True)
-        run_options_fit = st.button("Find Options That Fit Account", use_container_width=True)
-        run_option_tracker = st.button("View Option Tracker / Exit Plan", use_container_width=True)
+        run_option_tracker = st.button("My Option Trades", use_container_width=True)
 
-        # Keep the option tracker page visible across Streamlit reruns. This prevents
-        # manual adds and track-buttons from looking like they disappeared.
         if run_option_tracker:
             st.session_state["show_option_tracker"] = True
-        if run or run_scan or run_movers or run_hunter or run_options_fit:
+        if run or run_scan:
             st.session_state["show_option_tracker"] = False
-
-        st.caption("Use Analyze Stock for one ticker. Use the scan buttons to rank multiple setups. Use Options Fit to find contracts sized to your account. Use the tracker to monitor open calls/puts.")
 
     option_tracker_trades = refresh_option_tracker_prices(
         load_option_tracker(),
-        profit_target_pct=option_profit_target_pct,
-        stop_loss_pct=option_stop_loss_pct,
-        force_close_dte=int(option_force_close_dte),
+        profit_target_pct=OPT_PROFIT_TARGET_PCT,
+        stop_loss_pct=OPT_STOP_LOSS_PCT,
+        force_close_dte=OPT_FORCE_CLOSE_DTE,
     )
     save_option_tracker(option_tracker_trades)
 
     show_option_tracker = bool(st.session_state.get("show_option_tracker", False))
 
-    if not run and not run_scan and not run_movers and not run_hunter and not run_options_fit and not run_option_tracker and not show_option_tracker:
-        st.info(
-            "Enter a ticker on the left and click **Analyze Stock**, paste a watchlist and "
-            "click **Scan Watchlist**, click **Scan Top Movers**, use **Market Hunter Mode**, click **Find Options That Fit Account**, "
-            "or click **View Option Tracker / Exit Plan**."
-        )
+    # Compatibility stubs — these modes were removed from the simplified UI
+    run_movers = False
+    run_hunter = False
+    run_options_fit = False
+    enable_alerts = False
+    alert_confidence = "Buy or Sell"
+    alert_trade_type = "Any"
+    min_rr = 1.5
+    min_score = 2
+    show_only_actionable = True
+
+    if not run and not run_scan and not run_option_tracker and not show_option_tracker:
+        st.info("Enter a ticker on the left and click **Analyze Stock**, or paste tickers and click **Scan Watchlist**.")
+        if option_tracker_trades:
+            st.markdown("### Your Open Option Trades")
+            _render_mini_option_tracker(option_tracker_trades)
         return
 
     if run_option_tracker or show_option_tracker:
         render_option_tracker(
             option_trades=option_tracker_trades,
-            profit_target_pct=option_profit_target_pct,
-            stop_loss_pct=option_stop_loss_pct,
-            force_close_dte=int(option_force_close_dte),
+            profit_target_pct=OPT_PROFIT_TARGET_PCT,
+            stop_loss_pct=OPT_STOP_LOSS_PCT,
+            force_close_dte=OPT_FORCE_CLOSE_DTE,
         )
         return
 
-    if run_options_fit:
-        if options_scan_source == "Watchlist":
-            raw_tickers = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
-        elif options_scan_source == "Top Movers":
-            raw_tickers = get_top_mover_candidates(movers_source, max_options_scan_tickers)
-        elif options_scan_source == "Affordable Stocks (Mixed Risk)":
-            raw_tickers = get_top_mover_candidates("Affordable Stocks (Mixed Risk)", max_options_scan_tickers)
-        else:
-            raw_tickers = get_top_mover_candidates("Market hunter universe", max_options_scan_tickers)
-
+    if run_scan:
+        raw_tickers = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
         unique_tickers: List[str] = []
-        seen = set()
-        for t in raw_tickers:
-            if t not in seen:
-                unique_tickers.append(t)
-                seen.add(t)
-        unique_tickers = unique_tickers[:max_options_scan_tickers]
-
-        if not unique_tickers:
-            st.error("Please enter at least one ticker or choose a scanner source.")
-            return
-
-        options_rows = []
-        failed: List[str] = []
-        skipped: List[str] = []
-        progress = st.progress(0)
-        status = st.empty()
-        score_floor = abs(int(min_score))
-
-        for idx, tk in enumerate(unique_tickers, start=1):
-            status.write(f"Scanning stock and options for {tk} ({idx}/{len(unique_tickers)})")
-            try:
-                scan_bot = BeginnerFriendlyTABot(ticker=tk, position="watching", account_size=account_size, risk_pct=risk_pct)
-                snap = scan_bot.build_snapshot()
-                plan = snap["trade_plan"]
-
-                rr_ok = (plan.risk_reward or 0) >= min_rr
-                buy_ok = plan.confidence == "Buy" and plan.score >= score_floor
-                sell_ok = plan.confidence == "Sell" and plan.score <= -score_floor
-                if not rr_ok or not (buy_ok or sell_ok):
-                    skipped.append(f"{tk} (stock setup did not pass filters)")
-                    progress.progress(idx / len(unique_tickers))
-                    continue
-
-                options_df, strategy_text, issues = find_option_candidates(
-                    ticker=tk,
-                    current_price=float(snap["price"]),
-                    plan=plan,
-                    account_size=account_size,
-                    risk_pct=risk_pct,
-                    min_days=options_min_days,
-                    max_days=options_max_days,
-                    min_volume=min_option_volume,
-                    min_open_interest=min_open_interest,
-                    max_spread_pct=max_spread_pct,
-                    max_iv=max_iv,
-                    max_option_premium=max_option_premium,
-                    max_contracts=max_option_contracts,
-                    max_breakeven_move_pct=max_breakeven_move_pct,
-                )
-
-                if options_df.empty:
-                    skipped.append(f"{tk} (no usable options)")
-                    progress.progress(idx / len(unique_tickers))
-                    continue
-
-                filtered_options = options_df[options_df["Grade"].map(lambda g: grade_meets_minimum(str(g), minimum_option_grade))].copy()
-
-                if only_options_that_fit_account:
-                    filtered_options = filtered_options[
-                        (filtered_options["Suggested Contracts"] >= 1)
-                        & (filtered_options["Premium/Contract"] <= max_option_premium)
-                        & (filtered_options["Target Clears BE"] == True)
-                    ]
-
-                if filtered_options.empty:
-                    skipped.append(f"{tk} (options too expensive or below grade)")
-                    progress.progress(idx / len(unique_tickers))
-                    continue
-
-                best = filtered_options.iloc[0]
-                account_fit = bool(
-                    int(best["Suggested Contracts"]) >= 1
-                    and float(best["Premium/Contract"]) <= max_option_premium
-                    and bool(best["Target Clears BE"])
-                )
-                options_rows.append(
-                    {
-                        "Ticker": tk,
-                        "Account Fit": account_fit,
-                        "Action": best["Action"],
-                        "Option Grade": best["Grade"],
-                        "Option Score": int(best["Score"]),
-                        "Type": best["Type"],
-                        "Expiration": best["Expiration"],
-                        "DTE": int(best["DTE"]),
-                        "Strike": float(best["Strike"]),
-                        "Bid": float(best["Bid"]),
-                        "Ask": float(best["Ask"]),
-                        "Mid": float(best["Mid"]),
-                        "Premium/Contract": float(best["Premium/Contract"]),
-                        "Suggested Contracts": int(best["Suggested Contracts"]),
-                        "Max Loss": float(best["Max Loss"]),
-                        "Breakeven": float(best["Breakeven"]),
-                        "Target Clears BE": bool(best["Target Clears BE"]),
-                        "Stock Price": round(float(snap["price"]), 2),
-                        "Stock Entry": round(float(plan.entry_price), 2) if plan.entry_price is not None else np.nan,
-                        "Stock Target": round(float(plan.target_1), 2) if plan.target_1 is not None else np.nan,
-                        "Stock Stop": round(float(plan.stop_loss), 2) if plan.stop_loss is not None else np.nan,
-                        "Stock Bias": plan.bias,
-                        "Stock Confidence": plan.confidence,
-                        "Stock Score": int(plan.score),
-                        "Risk/Reward": round(float(plan.risk_reward), 2) if plan.risk_reward is not None else np.nan,
-                        "Trade Type": plan.trade_type,
-                        "Expected Hold": plan.expected_hold,
-                        "Volume": int(best["Volume"]),
-                        "Open Interest": int(best["Open Interest"]),
-                        "IV %": float(best["IV %"]),
-                        "Spread %": float(best["Spread %"]),
-                        "Warnings": str(best["Warnings"]),
-                        "Contract": str(best["Contract"]),
-                    }
-                )
-            except Exception as exc:
-                failed.append(f"{tk} ({exc})")
-
-            progress.progress(idx / len(unique_tickers))
-
-        status.empty()
-        progress.empty()
-
-        options_fit_df = pd.DataFrame(options_rows)
-        render_account_fit_options_results(
-            options_fit_df=options_fit_df,
-            failed=failed,
-            skipped=skipped,
-            account_size=account_size,
-            risk_pct=risk_pct,
-            minimum_option_grade=minimum_option_grade,
-            only_options_that_fit_account=only_options_that_fit_account,
-        )
-        return
-
-    if run_scan or run_movers or run_hunter:
-        if run_hunter:
-            raw_tickers = get_top_mover_candidates("Market hunter universe", max(movers_count, 25))
-        elif run_movers:
-            raw_tickers = get_top_mover_candidates(movers_source, movers_count)
-        else:
-            raw_tickers = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
-
-        unique_tickers: List[str] = []
-        seen = set()
+        seen: set = set()
         for t in raw_tickers:
             if t not in seen:
                 unique_tickers.append(t)
                 seen.add(t)
 
         if not unique_tickers:
-            st.error("Please enter at least one ticker in the watchlist scanner.")
+            st.error("Add at least one ticker to your watchlist first.")
             return
 
         rows = []
-        failed = []
+        failed: List[str] = []
         progress = st.progress(0)
         status = st.empty()
 
@@ -2972,73 +2779,52 @@ def main() -> None:
                 scan_bot = BeginnerFriendlyTABot(ticker=tk, position="watching", account_size=account_size, risk_pct=risk_pct)
                 snap = scan_bot.build_snapshot()
                 plan = snap["trade_plan"]
-                rows.append(
-                    {
-                        "Ticker": tk,
-                        "Price": round(float(snap["price"]), 2),
-                        "Daily Trend": snap["daily_trend"],
-                        "Weekly Trend": snap["weekly_trend"],
-                        "Bias": plan.bias,
-                        "Confidence": plan.confidence,
-                        "Score": plan.score,
-                        "Trade Type": plan.trade_type,
-                        "Expected Hold": plan.expected_hold,
-                        "Entry": round(plan.entry_price, 2) if plan.entry_price is not None else np.nan,
-                        "Stop": round(plan.stop_loss, 2) if plan.stop_loss is not None else np.nan,
-                        "Target": round(plan.target_1, 2) if plan.target_1 is not None else np.nan,
-                        "Risk/Reward": round(plan.risk_reward, 2) if plan.risk_reward is not None else np.nan,
-                        "RSI": round(float(snap["rsi"]), 2),
-                        "Pattern": snap["pattern"],
-                    }
-                )
+                rows.append({
+                    "Ticker": tk,
+                    "Price": round(float(snap["price"]), 2),
+                    "Action": action_label_from_plan(plan)[0],
+                    "Bias": plan.bias,
+                    "Confidence": plan.confidence,
+                    "Score": plan.score,
+                    "Entry": round(plan.entry_price, 2) if plan.entry_price is not None else np.nan,
+                    "Stop": round(plan.stop_loss, 2) if plan.stop_loss is not None else np.nan,
+                    "Target": round(plan.target_1, 2) if plan.target_1 is not None else np.nan,
+                    "Risk/Reward": round(plan.risk_reward, 2) if plan.risk_reward is not None else np.nan,
+                    "Hold": plan.expected_hold,
+                })
             except Exception:
                 failed.append(tk)
-
             progress.progress(idx / len(unique_tickers))
 
         status.empty()
         progress.empty()
 
         if not rows:
-            st.error("None of the watchlist tickers could be analyzed.")
+            st.error("Could not analyze any tickers.")
             return
 
         scan_df = pd.DataFrame(rows)
-        scan_df["RR Sort"] = scan_df["Risk/Reward"].fillna(-1)
-        scan_df = scan_df.sort_values(by=["Score", "RR Sort"], ascending=[False, False]).drop(columns=["RR Sort"])
+        scan_df = scan_df[scan_df["Confidence"] == "Buy"].sort_values("Score", ascending=False)
 
-        score_floor = abs(int(min_score))
-        if show_only_actionable:
-            buy_ok = (scan_df["Confidence"] == "Buy") & (scan_df["Score"] >= score_floor)
-            sell_ok = (scan_df["Confidence"] == "Sell") & (scan_df["Score"] <= -score_floor)
-            scan_df = scan_df[
-                (buy_ok | sell_ok)
-                & (scan_df["Risk/Reward"].fillna(0) >= min_rr)
-                & (~scan_df["Bias"].isin(["Neutral"]))
-            ]
+        st.markdown("## Watchlist Scan — Best Setups Right Now")
+        if scan_df.empty:
+            st.info("No strong buy setups in your watchlist right now. Check back later or add more tickers.")
         else:
-            scan_df = scan_df[
-                (scan_df["Score"].abs() >= score_floor)
-                | (scan_df["Risk/Reward"].fillna(0) >= min_rr)
-            ]
-
-        section_title = (
-            "## Market Hunter Results"
-            if run_hunter
-            else ("## Top Movers Scan Results" if run_movers else "## Watchlist Scanner Results")
-        )
-
-        render_scan_results(
-            scan_df=scan_df,
-            failed=failed,
-            enable_alerts=enable_alerts,
-            min_rr=min_rr,
-            min_score=min_score,
-            alert_confidence=alert_confidence,
-            alert_trade_type=alert_trade_type,
-            section_title=section_title,
-            run_hunter=run_hunter,
-        )
+            st.caption(f"Showing {len(scan_df)} buyable setups out of {len(rows)} scanned. Click a ticker to analyze it.")
+            st.dataframe(
+                scan_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                    "Entry": st.column_config.NumberColumn("Buy Near", format="$%.2f"),
+                    "Stop": st.column_config.NumberColumn("Exit If", format="$%.2f"),
+                    "Target": st.column_config.NumberColumn("Goal", format="$%.2f"),
+                    "Risk/Reward": st.column_config.NumberColumn("R:R", format="%.1f"),
+                },
+            )
+        if failed:
+            st.caption(f"Could not load: {', '.join(failed)}")
         return
 
     if not ticker:
@@ -3046,7 +2832,7 @@ def main() -> None:
         return
 
     try:
-        bot = BeginnerFriendlyTABot(ticker=ticker, position=position, account_size=account_size, risk_pct=risk_pct)
+        bot = BeginnerFriendlyTABot(ticker=ticker, position="watching", account_size=account_size, risk_pct=risk_pct)
         data = bot.build_snapshot()
     except Exception as exc:
         st.error(f"Could not analyze {ticker}: {exc}")
@@ -3054,326 +2840,140 @@ def main() -> None:
 
     trade_plan: TradePlan = data["trade_plan"]
     action_label, action_type, action_text = action_label_from_plan(trade_plan)
-    trade_steps = explain_trade_steps(trade_plan)
     beginner_summary = explain_trade_like_beginner(trade_plan)
 
-    st.markdown("## Stock Snapshot")
-    top1, top2, top3, top4 = st.columns(4)
-    top1.metric("Current Price", f"${data['price']:.2f}")
-    top2.metric("Daily Trend", data["daily_trend"])
-    top3.metric("Weekly Trend", data["weekly_trend"])
-    top4.metric("Monthly Trend", data["monthly_trend"])
+    # ── Header ──────────────────────────────────────────────────────────────
+    st.markdown(f"## {ticker}  —  ${data['price']:.2f}")
 
-    st.markdown("## What To Do Right Now")
+    # ── Big action box ───────────────────────────────────────────────────────
     if action_type == "success":
-        st.success(f"{action_label}: {action_text}")
+        st.success(f"**{action_label}** — {action_text}")
     elif action_type == "error":
-        st.error(f"{action_label}: {action_text}")
+        st.error(f"**{action_label}** — {action_text}")
     elif action_type == "warning":
-        st.warning(f"{action_label}: {action_text}")
+        st.warning(f"**{action_label}** — {action_text}")
     else:
-        st.info(f"{action_label}: {action_text}")
+        st.info(f"**{action_label}** — {action_text}")
 
-    hero1, hero2, hero3, hero4 = st.columns(4)
-    hero1.metric("Confidence", confidence_badge(trade_plan.confidence))
-    hero2.metric("Setup Score", f"{trade_plan.score}")
-    hero3.metric("Trade Type", trade_plan.trade_type)
-    hero4.metric("Expected Hold", trade_plan.expected_hold)
+    # ── Trade plan ───────────────────────────────────────────────────────────
+    if trade_plan.entry_price is not None:
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Buy Near", f"${trade_plan.entry_price:.2f}")
+        p2.metric("Exit If Falls To", f"${trade_plan.stop_loss:.2f}")
+        p3.metric("Profit Goal", f"${trade_plan.target_1:.2f}")
+        p4.metric("Hold For", trade_plan.expected_hold)
 
-    with st.expander("What do these numbers mean?", expanded=False):
-        st.markdown(
-            "**Confidence (Buy / Sell / Neutral):** Whether the majority of signals point up (Buy), down (Sell), or are mixed (Neutral). "
-            "Only trade in the direction that matches Confidence.\n\n"
-            "**Setup Score:** A count of how many signals fired in the same direction. "
-            "A score of 3–4 is decent. 5+ is strong. 0–2 means wait. Negative scores mean bearish signals dominate.\n\n"
-            "**Trade Type:** Swing trade means holding for days to weeks. Day trade / momentum means the setup looks more like a fast intraday move.\n\n"
-            "**Expected Hold:** A rough estimate of how long you might be in the trade. Not a guarantee — exit at your stop or target whenever they are hit."
-        )
+        if trade_plan.suggested_shares is not None:
+            total_cost = trade_plan.suggested_shares * trade_plan.entry_price
+            risk_display = f"${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "N/A"
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Shares To Buy", trade_plan.suggested_shares)
+            s2.metric("Total Cost", f"${total_cost:.2f}")
+            s3.metric("Max You Lose", risk_display)
+            st.caption(
+                f"If the stock drops to your exit price, you lose at most {risk_display}. "
+                "That is your risk setting in dollars. Never skip your exit — that is how you protect your account."
+            )
 
-    st.markdown("### What This Means In Plain English")
+    # ── Plain English explanation ────────────────────────────────────────────
+    st.markdown("---")
     st.markdown(beginner_summary)
 
-    st.markdown("### Why The Dashboard Thinks This")
-    st.info(trade_plan.explanation)
-
-    st.markdown("### Simple Trade Plan")
-    plan1, plan2, plan3, plan4 = st.columns(4)
-    plan1.metric("Entry", f"${trade_plan.entry_price:.2f}" if trade_plan.entry_price is not None else "N/A")
-    plan2.metric("Stop Loss", f"${trade_plan.stop_loss:.2f}" if trade_plan.stop_loss is not None else "N/A")
-    plan3.metric("Target", f"${trade_plan.target_1:.2f}" if trade_plan.target_1 is not None else "N/A")
-    plan4.metric("Risk/Reward", f"{trade_plan.risk_reward:.2f}" if trade_plan.risk_reward is not None else "N/A")
-
-    with st.expander("What does Entry / Stop / Target / Risk-Reward mean?", expanded=False):
-        st.markdown(
-            "**Entry:** The price where you would buy the stock. You do not have to buy the exact cent — anywhere close works.\n\n"
-            "**Stop Loss:** If the stock falls to this price, exit the trade immediately. "
-            "This is your protection. It limits how much you can lose on one trade. Do not skip it.\n\n"
-            "**Target:** The price you are aiming for. When the stock reaches this, you can sell and take your profit. "
-            "Some traders sell half at the target and let the rest run.\n\n"
-            "**Risk/Reward:** How much you could make compared to how much you are risking. "
-            "A 2.0 means you could make $2 for every $1 you risk. "
-            "Aim for at least 2.0. Anything below 1.5 is usually not worth the trade."
-        )
-
-    if trade_plan.suggested_shares is not None and trade_plan.entry_price is not None:
-        st.markdown("### How Many Shares To Buy")
-        total_cost = trade_plan.suggested_shares * trade_plan.entry_price
-        size1, size2, size3, size4 = st.columns(4)
-        size1.metric("Suggested Shares", trade_plan.suggested_shares)
-        size2.metric("Total Cost To Buy", f"${total_cost:.2f}")
-        size3.metric(
-            "Max You Could Lose",
-            f"${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "N/A",
-        )
-        size4.metric(
-            "Risk Per Share",
-            f"${trade_plan.risk_per_share:.2f}" if trade_plan.risk_per_share is not None else "N/A",
-        )
-        risk_display = f"${trade_plan.dollars_at_risk:.2f}" if trade_plan.dollars_at_risk is not None else "your risk limit"
-        st.caption(
-            f"This position size is calculated so that if the stock hits your stop loss, you lose at most "
-            f"{risk_display}. "
-            "Keeping each trade's loss small (typically 0.5%–1% of your account) is how you stay in the game long enough to learn."
-        )
-    else:
-        st.info("No position size available because there is no active trade setup.")
-
-    if enable_options_mode:
-        render_options_section(
-            ticker=ticker,
-            current_price=float(data["price"]),
-            plan=trade_plan,
-            account_size=account_size,
-            risk_pct=risk_pct,
-            min_days=options_min_days,
-            max_days=options_max_days,
-            min_volume=min_option_volume,
-            min_open_interest=min_open_interest,
-            max_spread_pct=max_spread_pct,
-            max_iv=max_iv,
-            max_option_premium=max_option_premium,
-            max_contracts=max_option_contracts,
-            max_breakeven_move_pct=max_breakeven_move_pct,
-        )
-
-    st.markdown("### Exactly What To Do")
-    for i, step in enumerate(trade_steps, start=1):
-        st.write(f"{i}. {step}")
-
+    # ── Option alternative ───────────────────────────────────────────────────
     if trade_plan.confidence == "Buy" and trade_plan.entry_price is not None:
-        if st.button("Track This Trade", use_container_width=True):
+        with st.spinner("Checking for an option play..."):
+            try:
+                opt_df, _, _ = find_option_candidates(
+                    ticker=ticker,
+                    current_price=float(data["price"]),
+                    plan=trade_plan,
+                    account_size=account_size,
+                    risk_pct=risk_pct,
+                    min_days=OPT_MIN_DAYS,
+                    max_days=OPT_MAX_DAYS,
+                    min_volume=OPT_MIN_VOL,
+                    min_open_interest=OPT_MIN_OI,
+                    max_spread_pct=OPT_MAX_SPREAD,
+                    max_iv=OPT_MAX_IV,
+                    max_option_premium=opt_max_premium,
+                    max_contracts=OPT_MAX_CONTRACTS,
+                    max_breakeven_move_pct=OPT_MAX_BREAKEVEN_PCT,
+                )
+                fit = opt_df[
+                    (opt_df["Suggested Contracts"] >= 1)
+                    & (opt_df["Target Clears BE"] == True)
+                    & (opt_df["Action"].isin(["BUY", "SMALL SIZE"]))
+                ] if not opt_df.empty else pd.DataFrame()
+            except Exception:
+                fit = pd.DataFrame()
+
+        if not fit.empty:
+            best = fit.iloc[0]
+            cost = float(best["Premium/Contract"])
+            profit_goal = round(cost * (1 + OPT_PROFIT_TARGET_PCT / 100), 2)
+            cut_loss_at = round(cost * (1 - OPT_STOP_LOSS_PCT / 100), 2)
+            exp_str = str(best["Expiration"])
+            st.markdown("---")
+            with st.container(border=True):
+                st.markdown(f"### Option Alternative — {ticker} {best['Type']} ${float(best['Strike']):.0f} exp {exp_str}")
+                st.markdown(
+                    f"Instead of buying shares, you could buy **1 {ticker} {best['Type']} option** "
+                    f"expiring **{exp_str}** with a **${float(best['Strike']):.2f} strike** for about **${cost:.2f}** per contract."
+                )
+                o1, o2, o3 = st.columns(3)
+                o1.metric("Cost Per Contract", f"${cost:.2f}")
+                o2.metric("Sell When Up 50%", f"${profit_goal:.2f}")
+                o3.metric("Cut Loss At Down 50%", f"${cut_loss_at:.2f}")
+                st.caption(
+                    f"A CALL option profits if {ticker} goes up past the breakeven price (${float(best['Breakeven']):.2f}). "
+                    "You can lose the full cost of the contract if the stock does not move. "
+                    "Options are riskier than shares — only use money you can afford to lose entirely."
+                )
+                if st.button(f"Track This Option", key="track_opt_simple"):
+                    try:
+                        _track_option_from_row(best, ticker, trade_plan)
+                        st.success("Option added to your tracker.")
+                    except Exception as exc:
+                        st.error(f"Could not save: {exc}")
+
+    # ── Price chart ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Price Chart")
+    chart_df = data["chart_df"][["Close", "MA50", "MA200"]].dropna()
+    st.line_chart(chart_df)
+    st.caption("Blue = closing price. Orange = 50-day average. Red = 200-day average. When price is above both averages the trend is bullish.")
+
+    # ── Why collapsed ────────────────────────────────────────────────────────
+    with st.expander("Why does the dashboard say this?"):
+        st.info(trade_plan.explanation)
+        st.markdown(
+            f"**Trend:** Daily {data['daily_trend']} | Weekly {data['weekly_trend']} | Monthly {data['monthly_trend']}\n\n"
+            f"**Pattern detected:** {data['pattern']}\n\n"
+            f"**RSI:** {data['rsi']:.1f} — {bot.rsi_text(data['rsi'])}\n\n"
+            f"**MACD:** {bot.macd_text(data['macd'], data['macd_signal'], data['macd_hist'])}\n\n"
+            f"**Volume:** {data['volume_text']}"
+        )
+        if data.get("vwap"):
+            direction = "above" if data["price"] > data["vwap"] else "below"
+            st.markdown(f"**VWAP today:** ${data['vwap']:.2f} — price is {direction} VWAP")
+
+    # ── Track button ─────────────────────────────────────────────────────────
+    if trade_plan.confidence == "Buy" and trade_plan.entry_price is not None:
+        if st.button("Track This Stock Trade", use_container_width=True):
             try:
                 add_trade_to_tracker(ticker, trade_plan)
-                st.success("Trade added to paper tracker.")
+                st.success("Trade saved to your tracker.")
             except Exception as exc:
-                st.error(f"Could not add trade to tracker: {exc}")
+                st.error(f"Could not save: {exc}")
 
-    st.markdown("### Price Chart")
-    chart_df = data["chart_df"][["Close", "MA50", "MA100", "MA200", "BB_Upper", "BB_Mid", "BB_Lower"]].dropna()
-    st.line_chart(chart_df)
-
-    st.markdown("### Chart Breakdown")
-    left, right = st.columns(2)
-
-    with left:
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Support and Resistance**")
-            st.write(f"Support levels: {', '.join(f'${x:.2f}' for x in data['supports'])}")
-            st.write(f"Resistance levels: {', '.join(f'${x:.2f}' for x in data['resistances'])}")
-            st.caption(
-                "**Support** is a price level where the stock has bounced upward before — buyers tend to step in near these prices. "
-                "**Resistance** is where the stock has been pushed back down before — sellers tend to appear there. "
-                "Your stop-loss and target are anchored to these levels."
-            )
-
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Moving Averages**")
-            st.write(f"50-day MA: ${data['ma50']:.2f}")
-            st.write(f"100-day MA: ${data['ma100']:.2f}")
-            st.write(f"200-day MA: ${data['ma200']:.2f}")
-            st.caption(
-                bot.crossover_text(data["ma50"], data["ma100"], data["ma200"])
-                + " Moving averages smooth out the noise and show the underlying trend. "
-                "When price is above all three, the stock has been in an uptrend across multiple timeframes."
-            )
-            if data.get("vwap") is not None:
-                direction = "above" if data["price"] > data["vwap"] else "below"
-                st.write(f"VWAP (today): ${data['vwap']:.2f} — price is {direction} VWAP")
-                st.caption(
-                    "VWAP (Volume Weighted Average Price) resets each morning and tracks where most of today's shares traded. "
-                    "Price above VWAP means buyers have controlled the day so far. Below VWAP means sellers are winning today."
-                )
-
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Chart Pattern**")
-            st.write(f"Detected pattern: {data['pattern']}")
-            st.caption(
-                "Chart patterns show the shape of price movement over time. "
-                "An uptrend (higher highs, higher lows) means buyers keep pushing price up. "
-                "Triangles and consolidations mean the stock is pausing — a breakout may follow. "
-                "No pattern just means the move does not fit a clear template right now."
-            )
-
-    with right:
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Momentum Indicators**")
-            st.write(f"RSI (14): {data['rsi']:.2f}")
-            st.write(bot.rsi_text(data["rsi"]))
-            st.caption(
-                "RSI (Relative Strength Index) measures how fast the price has been moving. "
-                "30–50 is neutral to soft. 50–70 is the healthy bullish zone (momentum building without being overheated). "
-                "Above 70 = overbought (may pull back soon). Below 30 = oversold (may bounce)."
-            )
-            st.write(f"MACD: {data['macd']:.4f}")
-            st.write(f"Signal Line: {data['macd_signal']:.4f}")
-            st.caption(
-                bot.macd_text(data["macd"], data["macd_signal"], data["macd_hist"])
-                + " MACD compares two moving averages. When MACD crosses above its signal line, short-term momentum "
-                "is outpacing long-term momentum — a bullish sign. When it crosses below, momentum is fading."
-            )
-
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Bollinger Bands**")
-            st.write(f"Upper: ${data['bb_upper']:.2f}")
-            st.write(f"Middle: ${data['bb_mid']:.2f}")
-            st.write(f"Lower: ${data['bb_lower']:.2f}")
-            st.caption(
-                bot.bollinger_text(data["price"], data["bb_upper"], data["bb_mid"], data["bb_lower"])
-                + " Bollinger Bands are like a channel around the price. "
-                "When price is near the upper band, it has moved far above average — it may be extended. "
-                "Near the lower band means the opposite. Price in the middle means it is normal range."
-            )
-
-        card = st.container(border=True)
-        with card:
-            st.markdown("**Volume Read**")
-            st.write(data["volume_text"])
-            st.caption(
-                "Volume is how many shares were traded today. High volume on an up day means buyers are motivated — "
-                "that is a bullish confirmation. High volume on a down day means sellers are in control. "
-                "Low volume moves are less reliable because fewer people are involved."
-            )
-
-    st.markdown("### Extra Details")
-    detail1, detail2, detail3, detail4 = st.columns(4)
-    detail1.metric("Bias", trade_plan.bias)
-    detail2.metric("Action", action_label)
-    detail3.metric(
-        "Setup Strength",
-        "Strong" if abs(trade_plan.score) >= 4 else "Moderate" if abs(trade_plan.score) >= 2 else "Weak",
-    )
-    detail4.metric("Expected Hold", trade_plan.expected_hold)
-
-    st.info(
-        "**Beginner reminder:** Even a great-looking chart can fail. No indicator is right 100% of the time. "
-        "The stop-loss is not there to punish you — it is there to limit damage on the trades that do not work. "
-        "Your goal is to keep losses small and let winners run."
-    )
-
-    st.markdown("### Simple Rules To Follow")
-    st.markdown(
-        "- Only enter when the dashboard says **TAKE TRADE** (green box at the top)\n"
-        "- The score should be **3 or higher** for bullish setups\n"
-        "- Risk/reward should be **2.0 or better** — that means the potential gain is at least twice the potential loss\n"
-        "- If it says **WATCH** or **SKIP**, do not force the trade — wait for a better setup\n"
-        "- Always use the stop-loss. If the stock hits your stop, exit. Do not move it lower hoping it comes back.\n"
-        "- Risk no more than 0.5%–1% of your account on any single trade"
-    )
-
-    st.markdown("### Paper Trade Tracker")
-    if tracker_trades:
-        tracker_df = pd.DataFrame(tracker_trades)
-        display_cols = [
-            c for c in [
-                "ticker", "status", "entry", "stop", "target", "current_price",
-                "pnl_per_share", "pnl_pct", "score", "trade_type", "expected_hold", "added_at_utc"
-            ] if c in tracker_df.columns
-        ]
-        st.dataframe(
-            tracker_df[display_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "ticker": st.column_config.TextColumn("Ticker"),
-                "status": st.column_config.TextColumn("Status"),
-                "entry": st.column_config.NumberColumn("Entry", format="$%.2f"),
-                "stop": st.column_config.NumberColumn("Stop", format="$%.2f"),
-                "target": st.column_config.NumberColumn("Target", format="$%.2f"),
-                "current_price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
-                "pnl_per_share": st.column_config.NumberColumn("PnL/Share", format="$%.2f"),
-                "pnl_pct": st.column_config.NumberColumn("PnL %", format="%.2f%%"),
-                "score": st.column_config.NumberColumn("Score"),
-                "trade_type": st.column_config.TextColumn("Trade Type"),
-                "expected_hold": st.column_config.TextColumn("Expected Hold"),
-                "added_at_utc": st.column_config.TextColumn("Added UTC"),
-            },
-        )
-    else:
-        st.info("No paper trades saved yet. Use 'Track This Trade' on a stock setup to start building results.")
-
-    st.markdown("### Option Tracker")
-    if option_tracker_trades:
-        opt_df = pd.DataFrame(option_tracker_trades)
-        opt_cols = [
-            c for c in [
-                "ticker", "option_type", "expiration", "strike", "status", "contracts",
-                "entry_contract_cost", "current_contract_cost", "pnl_dollars", "pnl_pct", "dte",
-                "exit_recommendation", "exit_reason",
-            ] if c in opt_df.columns
-        ]
-        st.dataframe(opt_df[opt_cols], use_container_width=True, hide_index=True)
-        st.caption("For full cards and buttons, use the sidebar button: View Option Tracker / Exit Plan.")
-    else:
-        st.info("No option trades saved yet. Use the scanner's track button or the option tracker manual form.")
-
-    st.markdown("### Quick Backtest")
-    col_bt1, col_bt2 = st.columns([1, 1])
-    with col_bt1:
-        backtest_ticker = st.text_input("Backtest ticker", value=ticker, key="backtest_ticker").upper().strip()
-    with col_bt2:
-        run_backtest = st.button("Run Simple Backtest", use_container_width=True)
-
-    if run_backtest and backtest_ticker:
-        try:
-            bt_bot = BeginnerFriendlyTABot(backtest_ticker, "watching", account_size=account_size, risk_pct=risk_pct)
-            bt_df = run_simple_backtest(bt_bot, backtest_ticker, lookback_bars=180)
-            if bt_df.empty:
-                st.warning("No qualifying buy signals found in the backtest window.")
-            else:
-                wins = int((bt_df["Outcome"] == "TARGET HIT").sum())
-                losses = int((bt_df["Outcome"] == "STOP HIT").sum())
-                total = len(bt_df)
-                avg_pnl = round(bt_df["PnL %"].mean(), 2)
-                win_rate = round((wins / total) * 100, 2) if total else 0.0
-
-                a, b, c, d = st.columns(4)
-                a.metric("Signals", total)
-                b.metric("Win Rate", f"{win_rate}%")
-                c.metric("Avg PnL %", f"{avg_pnl}%")
-                d.metric("Stops Hit", losses)
-
-                st.dataframe(bt_df, use_container_width=True, hide_index=True)
-                st.caption("Simple backtest: long-only buy signals, hold up to 10 trading days, exits at stop or target if hit.")
-        except Exception as exc:
-            st.error(f"Backtest failed: {exc}")
-
-    st.markdown("### Institutional-Style Reality Check")
-    st.write(
-        "This dashboard can rank and explain strong technical setups across a watchlist, but it does not have access "
-        "to nonpublic information, hedge fund live order flow, or politician-only knowledge. Its edge comes from "
-        "disciplined filtering, risk control, and avoiding weak trades."
-    )
-
-    with st.expander("How to run this locally"):
-        st.code(
-            "py -m pip install -r requirements.txt\npy -m streamlit run Beginner_Friendly_Stock_Dashboard.py",
-            language="bash",
-        )
+    # ── Open trades ──────────────────────────────────────────────────────────
+    if tracker_trades or option_tracker_trades:
+        st.markdown("---")
+        st.markdown("### Your Open Trades")
+        if tracker_trades:
+            _render_mini_stock_tracker(tracker_trades)
+        if option_tracker_trades:
+            _render_mini_option_tracker(option_tracker_trades)
 
 
 if __name__ == "__main__":
