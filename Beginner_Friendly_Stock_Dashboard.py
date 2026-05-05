@@ -2818,15 +2818,60 @@ def main() -> None:
 
     if run_holdings or show_holdings:
         holdings = load_holdings()
-        if not holdings:
-            st.error("No holdings found. Make sure holdings.json is in the same folder as the dashboard.")
-            return
 
         st.markdown("## My Holdings — Dashboard Signals")
-        st.caption(
-            "Each position is scanned with the same analysis as Analyze Stock. "
-            "Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish."
-        )
+
+        # ── Editable holdings list ───────────────────────────────────────────
+        with st.expander("Edit Holdings — add new stocks or remove ones you sold", expanded=False):
+            st.caption(
+                "Change shares or avg cost, add a new row at the bottom, or delete rows for stocks you sold. "
+                "Click **Save Holdings** when done — the page will rescan with your updated list."
+            )
+            edit_df = pd.DataFrame([{
+                "Ticker": h.get("ticker", ""),
+                "Name": h.get("name", h.get("ticker", "")),
+                "Shares": round(float(h.get("shares", 0) or 0), 6),
+                "Avg Cost": round(float(h.get("avg_cost", 0) or 0), 2),
+            } for h in holdings])
+
+            edited = st.data_editor(
+                edit_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=400,
+                column_config={
+                    "Ticker": st.column_config.TextColumn("Ticker", help="Stock symbol, e.g. AAPL"),
+                    "Name": st.column_config.TextColumn("Name", help="Optional company name"),
+                    "Shares": st.column_config.NumberColumn("Shares", format="%.4f", min_value=0.0),
+                    "Avg Cost": st.column_config.NumberColumn("Avg Cost ($)", format="$%.2f", min_value=0.0),
+                },
+                hide_index=True,
+            )
+
+            if st.button("Save Holdings", type="primary", key="save_holdings_btn"):
+                new_holdings = []
+                for _, row in edited.iterrows():
+                    ticker = str(row.get("Ticker", "")).upper().strip()
+                    if ticker:
+                        new_holdings.append({
+                            "ticker": ticker,
+                            "name": str(row.get("Name", ticker)),
+                            "shares": float(row.get("Shares") or 0),
+                            "avg_cost": float(row.get("Avg Cost") or 0),
+                        })
+                try:
+                    HOLDINGS_FILE.write_text(json.dumps(new_holdings, indent=2), encoding="utf-8")
+                    st.success(f"Saved {len(new_holdings)} positions. Rescanning now...")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save: {exc}")
+
+        # ── Signal scan ──────────────────────────────────────────────────────
+        if not holdings:
+            st.info("No holdings found — add some using the editor above.")
+            return
+
+        st.caption("Green = still looks good. Yellow = mixed signals, watch closely. Red = chart has turned bearish.")
 
         rows_h = []
         failed_h: List[str] = []
@@ -2879,6 +2924,7 @@ def main() -> None:
             holdings_df,
             use_container_width=True,
             hide_index=True,
+            height=650,
             column_config={
                 "Avg Cost": st.column_config.NumberColumn("Avg Cost", format="$%.2f"),
                 "Price Now": st.column_config.NumberColumn("Price Now", format="$%.2f"),
