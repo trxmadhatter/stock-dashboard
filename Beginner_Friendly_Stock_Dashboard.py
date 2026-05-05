@@ -410,10 +410,13 @@ class BeginnerFriendlyTABot:
 
         atr = float(tr.rolling(14).mean().iloc[-1])
         last_open = float(df["Open"].iloc[-1])
-        candle_body_pct = abs(close - last_open) / max(last_open, 0.01)
         vol_spike = last_vol > avg20_vol * 1.3
-        strong_candle = candle_body_pct >= 0.005
-        vwap_committed = vwap is None or (abs(close - vwap) / vwap >= 0.003)
+        if bullish > bearish:
+            strong_candle = close > last_open and (close - last_open) / max(last_open, 0.01) >= 0.005
+            vwap_committed = vwap is None or close > vwap * 1.003
+        else:
+            strong_candle = close < last_open and (last_open - close) / max(last_open, 0.01) >= 0.005
+            vwap_committed = vwap is None or close < vwap * 0.997
         is_day_trade = vol_spike and strong_candle and vwap_committed
         if is_day_trade and intraday_atr_val is not None:
             effective_atr = intraday_atr_val
