@@ -2683,30 +2683,21 @@ def main() -> None:
     OPT_FORCE_CLOSE_DTE = 2
 
     with st.sidebar:
-        st.markdown("### What to analyze")
-        ticker = st.text_input("Ticker Symbol", value="AAPL", help="Type any US stock ticker, e.g. AAPL, TSLA, F").upper().strip()
-
-        st.markdown("### Your account")
-        account_size = st.number_input(
-            "Account Size ($)", min_value=100.0, max_value=1_000_000.0, value=5_000.0, step=100.0,
-            help="How much money is in your trading account.",
-        )
-        risk_pct_display = st.number_input(
-            "Risk Per Trade (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1,
-            help="How much of your account you are willing to lose on one trade. 0.5% on $5,000 = $25.",
-        )
+        ticker = st.text_input("Ticker Symbol", value="AAPL", placeholder="e.g. AAPL, TSLA, F").upper().strip()
+        account_size = st.number_input("Account Size ($)", min_value=100.0, max_value=1_000_000.0, value=5_000.0, step=100.0)
+        risk_pct_display = st.number_input("Risk Per Trade (%)", min_value=0.1, max_value=5.0, value=0.5, step=0.1, help="0.5% on $5,000 = $25 max loss per trade")
         risk_pct = risk_pct_display / 100.0
         opt_max_premium = min(account_size * risk_pct * 4, 500.0)
 
-        st.markdown("### Watchlist")
-        default_watchlist = load_saved_watchlist("AAPL, MSFT, NVDA, AMZN, TSLA")
-        watchlist_text = st.text_area("Tickers (comma separated)", value=default_watchlist, height=90)
-        if st.button("Save Watchlist", use_container_width=True):
-            try:
-                save_watchlist(watchlist_text)
-                st.success("Saved.")
-            except Exception as exc:
-                st.error(f"Could not save: {exc}")
+        with st.expander("Watchlist"):
+            default_watchlist = load_saved_watchlist("AAPL, MSFT, NVDA, AMZN, TSLA")
+            watchlist_text = st.text_area("Tickers (comma separated)", value=default_watchlist, height=90, label_visibility="collapsed")
+            if st.button("Save Watchlist", use_container_width=True):
+                try:
+                    save_watchlist(watchlist_text)
+                    st.success("Saved.")
+                except Exception as exc:
+                    st.error(f"Could not save: {exc}")
 
         st.markdown("---")
         run = st.button("Analyze Stock", use_container_width=True, type="primary")
