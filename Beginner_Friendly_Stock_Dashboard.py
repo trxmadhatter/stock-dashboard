@@ -1564,16 +1564,65 @@ def save_option_tracker(trades: List[dict]) -> None:
     OPTION_TRACKER_FILE.write_text(json.dumps(trades, indent=2), encoding="utf-8")
 
 
+_DEFAULT_HOLDINGS: List[dict] = [
+    {"ticker": "AMZN", "name": "Amazon", "shares": 21.038473, "avg_cost": 118.12},
+    {"ticker": "NVDA", "name": "NVIDIA", "shares": 22.442405, "avg_cost": 119.11},
+    {"ticker": "AAPL", "name": "Apple", "shares": 20.632996, "avg_cost": 196.03},
+    {"ticker": "NET", "name": "Cloudflare", "shares": 10.222335, "avg_cost": 58.70},
+    {"ticker": "SHOP", "name": "Shopify", "shares": 5.0, "avg_cost": 62.91},
+    {"ticker": "VT", "name": "Vanguard Total World Stock ETF", "shares": 5.015628, "avg_cost": 242.17},
+    {"ticker": "VIK", "name": "Viking Holdings", "shares": 10.0, "avg_cost": 35.72},
+    {"ticker": "NOW", "name": "ServiceNow", "shares": 5.0, "avg_cost": 73.98},
+    {"ticker": "ET", "name": "Energy Transfer", "shares": 109.713522, "avg_cost": 16.43},
+    {"ticker": "GOOGL", "name": "Alphabet", "shares": 0.877248, "avg_cost": 178.79},
+    {"ticker": "ASTS", "name": "AST SpaceMobile", "shares": 2.42738, "avg_cost": 24.72},
+    {"ticker": "CPNG", "name": "Coupang", "shares": 26.76335, "avg_cost": 16.63},
+    {"ticker": "ONON", "name": "On Holding", "shares": 25.0, "avg_cost": 43.47},
+    {"ticker": "QQQ", "name": "Invesco QQQ Trust", "shares": 3.381576, "avg_cost": 583.48},
+    {"ticker": "AVGO", "name": "Broadcom", "shares": 0.90686, "avg_cost": 228.02},
+    {"ticker": "AA", "name": "Alcoa", "shares": 5.0, "avg_cost": 37.24},
+    {"ticker": "IONQ", "name": "IonQ", "shares": 6.04047, "avg_cost": 33.11},
+    {"ticker": "TBBB", "name": "BBB Foods Inc.", "shares": 10.0, "avg_cost": 26.38},
+    {"ticker": "FCX", "name": "Freeport-McMoRan", "shares": 5.013338, "avg_cost": 41.31},
+    {"ticker": "TSLA", "name": "Tesla", "shares": 0.275724, "avg_cost": 292.25},
+    {"ticker": "PLTR", "name": "Palantir", "shares": 3.884691, "avg_cost": 154.45},
+    {"ticker": "GSK", "name": "GSK plc", "shares": 5.040136, "avg_cost": 42.17},
+    {"ticker": "NXPI", "name": "NXP Semiconductors", "shares": 0.781232, "avg_cost": 192.86},
+    {"ticker": "TEM", "name": "Tempus AI", "shares": 2.78641, "avg_cost": 53.72},
+    {"ticker": "CRWD", "name": "CrowdStrike", "shares": 0.266171, "avg_cost": 355.41},
+    {"ticker": "VOO", "name": "Vanguard S&P 500 ETF", "shares": 0.000748, "avg_cost": 601.60},
+    {"ticker": "MSFT", "name": "Microsoft", "shares": 0.346825, "avg_cost": 420.47},
+    {"ticker": "PANW", "name": "Palo Alto Networks", "shares": 1.075752, "avg_cost": 173.29},
+    {"ticker": "SCHD", "name": "Schwab US Dividend Equity ETF", "shares": 56.7382, "avg_cost": 29.28},
+    {"ticker": "MRVL", "name": "Marvell Technology", "shares": 5.001837, "avg_cost": 82.08},
+    {"ticker": "CVX", "name": "Chevron", "shares": 0.006368, "avg_cost": 128.77},
+    {"ticker": "GEHC", "name": "GE HealthCare", "shares": 0.0007, "avg_cost": 71.43},
+    {"ticker": "MDT", "name": "Medtronic", "shares": 0.00004, "avg_cost": 0.0},
+    {"ticker": "EW", "name": "Edwards Lifesciences", "shares": 0.00025, "avg_cost": 80.0},
+    {"ticker": "DIS", "name": "Disney", "shares": 0.000066, "avg_cost": 151.52},
+    {"ticker": "BBAI", "name": "BigBear.ai", "shares": 10.0, "avg_cost": 7.96},
+    {"ticker": "VST", "name": "Vistra", "shares": 1.105389, "avg_cost": 190.0},
+    {"ticker": "OPRA", "name": "Opera", "shares": 11.027324, "avg_cost": 18.14},
+    {"ticker": "TTD", "name": "The Trade Desk", "shares": 13.797785, "avg_cost": 45.91},
+    {"ticker": "IBP", "name": "Installed Building Products", "shares": 0.416627, "avg_cost": 339.49},
+    {"ticker": "LHX", "name": "L3Harris", "shares": 0.346894, "avg_cost": 344.37},
+    {"ticker": "HL", "name": "Hecla Mining", "shares": 3.644826, "avg_cost": 22.13},
+    {"ticker": "CDE", "name": "Coeur Mining", "shares": 4.569002, "avg_cost": 21.72},
+    {"ticker": "XOVR", "name": "ERShares Crossover ETF", "shares": 0.533333, "avg_cost": 18.75},
+]
+
+
 def load_holdings() -> List[dict]:
     try:
         if HOLDINGS_FILE.exists():
             content = HOLDINGS_FILE.read_text(encoding="utf-8").strip()
             if content:
                 data = json.loads(content)
-                return data if isinstance(data, list) else []
+                if isinstance(data, list) and data:
+                    return data
     except Exception:
         pass
-    return []
+    return _DEFAULT_HOLDINGS
 
 
 def go_to_option_tracker(message: str = "") -> None:
