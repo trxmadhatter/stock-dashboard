@@ -3036,14 +3036,18 @@ def main() -> None:
                 rr = b_plan.risk_reward if b_plan.risk_reward is not None else 0.0
                 if b_plan.confidence == "Buy" and b_plan.score >= 3 and rr >= 2.0:
                     buy_rows.append({
-                        "Ticker": tk,
-                        "Price": round(float(b_snap["price"]), 2),
-                        "Score": b_plan.score,
-                        "Buy Near": round(b_plan.entry_price, 2) if b_plan.entry_price is not None else None,
-                        "Exit If": round(b_plan.stop_loss, 2) if b_plan.stop_loss is not None else None,
-                        "Goal": round(b_plan.target_1, 2) if b_plan.target_1 is not None else None,
-                        "R:R": round(rr, 1),
-                        "Hold": b_plan.expected_hold,
+                        "ticker": tk,
+                        "price": round(float(b_snap["price"]), 2),
+                        "score": b_plan.score,
+                        "entry": round(b_plan.entry_price, 2) if b_plan.entry_price is not None else None,
+                        "stop": round(b_plan.stop_loss, 2) if b_plan.stop_loss is not None else None,
+                        "target": round(b_plan.target_1, 2) if b_plan.target_1 is not None else None,
+                        "rr": round(rr, 1),
+                        "hold": b_plan.expected_hold,
+                        "shares": b_plan.suggested_shares,
+                        "total_cost": round(b_plan.suggested_shares * b_plan.entry_price, 2) if b_plan.suggested_shares and b_plan.entry_price else None,
+                        "max_loss": round(b_plan.dollars_at_risk, 2) if b_plan.dollars_at_risk is not None else None,
+                        "why": explain_trade_like_beginner(b_plan),
                     })
             except Exception:
                 buy_failed.append(tk)
@@ -3056,23 +3060,32 @@ def main() -> None:
         if not buy_rows:
             st.info("No strong buy setups found right now. The market may be mixed — check back later or try Scan Watchlist.")
         else:
-            buy_df = pd.DataFrame(buy_rows).sort_values("Score", ascending=False).head(10)
+            top_buys = sorted(buy_rows, key=lambda r: r["score"], reverse=True)[:10]
             st.caption(
                 f"Found {len(buy_rows)} TAKE TRADE setups out of {len(combined_tickers)} scanned. "
-                "Showing top 10 by score. Type a ticker from this list into Analyze Stock for the full breakdown."
+                "Showing top 10 by score."
             )
-            st.dataframe(
-                buy_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
-                    "Buy Near": st.column_config.NumberColumn("Buy Near", format="$%.2f"),
-                    "Exit If": st.column_config.NumberColumn("Exit If", format="$%.2f"),
-                    "Goal": st.column_config.NumberColumn("Goal", format="$%.2f"),
-                    "R:R": st.column_config.NumberColumn("R:R", format="%.1f"),
-                },
-            )
+            for row in top_buys:
+                with st.container(border=True):
+                    st.markdown(f"### {row['ticker']}  —  ${row['price']:.2f}  ·  Score {row['score']}")
+                    st.success("TAKE TRADE — Strong buy setup")
+
+                    if row["entry"] is not None:
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Buy Near", f"${row['entry']:.2f}")
+                        c2.metric("Exit If Falls To", f"${row['stop']:.2f}" if row["stop"] else "—")
+                        c3.metric("Profit Goal", f"${row['target']:.2f}" if row["target"] else "—")
+                        c4.metric("Hold For", row["hold"])
+
+                    if row["shares"] is not None:
+                        s1, s2, s3 = st.columns(3)
+                        s1.metric("Shares To Buy", row["shares"])
+                        s2.metric("Total Cost", f"${row['total_cost']:.2f}" if row["total_cost"] else "—")
+                        s3.metric("Max You Lose", f"${row['max_loss']:.2f}" if row["max_loss"] else "—")
+
+                    with st.expander("Why is this a buy?"):
+                        st.markdown(row["why"])
+
         if buy_failed:
             st.caption(f"Could not load: {', '.join(buy_failed)}")
         return
